@@ -7,13 +7,21 @@
 #   make submit       # build notebook from agent/my_agent.py + push to Kaggle
 #   make status       # tail the latest Kaggle run
 
-PYTHON          ?= python3.12
 VENV            := .venv
-VENV_PY         := $(VENV)/bin/python
-VENV_PIP        := $(VENV)/bin/pip
+
+ifeq ($(OS),Windows_NT)
+    PYTHON   ?= py -3.14
+    VENV_BIN := $(VENV)/Scripts
+else
+    PYTHON   ?= python3.14
+    VENV_BIN := $(VENV)/bin
+endif
+
+VENV_PY         := $(VENV_BIN)/python
+VENV_PIP        := $(VENV_BIN)/pip
 # Read the project-local token at recipe time and expose it as KAGGLE_API_TOKEN
 # (the only env var the modern Kaggle CLI honours for token auth).
-KAGGLE          := KAGGLE_API_TOKEN=$$(cat .kaggle/access_token) $(VENV)/bin/kaggle
+KAGGLE          := KAGGLE_API_TOKEN=$$(cat .kaggle/access_token) $(VENV_BIN)/kaggle
 FRAMEWORK_REPO  := https://github.com/arcprize/ARC-AGI-3-Agents.git
 FRAMEWORK_DIR   := vendor/ARC-AGI-3-Agents
 COMP_SLUG       := arc-prize-2026-arc-agi-3
@@ -23,12 +31,7 @@ STEPS           ?= 200
 .PHONY: help setup play-local pull-sample notebook submit status verify-local clean _check-kaggle
 
 _check-kaggle:
-	@if [ ! -s .kaggle/access_token ]; then \
-	    echo "ERROR: .kaggle/access_token is missing or empty."; \
-	    echo "       Generate a token at https://www.kaggle.com/settings (API → Create New Token)"; \
-	    echo "       and save it as a one-line file at: $(PWD)/.kaggle/access_token"; \
-	    exit 1; \
-	fi
+	@$(VENV_PY) -c "import os, sys; token_file = '.kaggle/access_token'; home_json = os.path.expanduser('~/.kaggle/kaggle.json'); has_token = (os.path.exists(token_file) and os.path.getsize(token_file) > 0) or (os.path.exists(home_json) and os.path.getsize(home_json) > 0) or ('KAGGLE_API_TOKEN' in os.environ) or ('KAGGLE_USERNAME' in os.environ); sys.exit(0) if has_token else print('ERROR: Kaggle credentials missing.\n       Create an API token at https://www.kaggle.com/settings\n       and save it as .kaggle/access_token or ~/.kaggle/kaggle.json') or sys.exit(1)"
 
 help:
 	@awk 'BEGIN{FS=":.*##"} /^[a-zA-Z_-]+:.*##/ {printf "  %-15s %s\n",$$1,$$2}' $(MAKEFILE_LIST)
@@ -37,15 +40,9 @@ help:
 
 setup: ## One-time install: venv, arc-agi, kaggle CLI, clone framework
 	$(PYTHON) -m venv $(VENV)
-	$(VENV_PIP) install --upgrade pip
-	$(VENV_PIP) install "arc-agi>=0.9.6" "kaggle>=2.2" python-dotenv pandas pyarrow
-	@if [ ! -d "$(FRAMEWORK_DIR)/.git" ]; then \
-	    mkdir -p vendor && git clone --depth 1 $(FRAMEWORK_REPO) $(FRAMEWORK_DIR); \
-	else \
-	    git -C $(FRAMEWORK_DIR) pull --ff-only; \
-	fi
-	@# Slim agents/__init__.py so we don't need langgraph/langsmith/smolagents/etc.
-	@# (Same trick the official Stochastic Goose sample uses on Kaggle.)
+	$(VENV_PY) -m pip install --upgrade pip
+	$(VENV_PY) -m pip install "arc-agi>=0.9.6" "kaggle>=2.2" python-dotenv pandas pyarrow
+	@$(VENV_PY) -c "import os, subprocess; os.makedirs('vendor', exist_ok=True); subprocess.run(['git', 'clone', '--depth', '1', '$(FRAMEWORK_REPO)', '$(FRAMEWORK_DIR)']) if not os.path.exists('$(FRAMEWORK_DIR)/.git') else subprocess.run(['git', '-C', '$(FRAMEWORK_DIR)', 'pull', '--ff-only'])"
 	@$(VENV_PY) scripts/slim_framework.py
 	@echo ""
 	@echo "Setup complete. Try:  make play-local"
@@ -69,16 +66,12 @@ notebook: ## Splice agent/my_agent.py into notebooks/submission.ipynb
 	$(VENV_PY) scripts/build_notebook.py
 
 submit: notebook _check-kaggle ## Build notebook and push to Kaggle (one-line submission)
-	@grep -q REPLACE_WITH_YOUR_USERNAME notebooks/kernel-metadata.json && { \
-	    echo "ERROR: edit notebooks/kernel-metadata.json and replace REPLACE_WITH_YOUR_USERNAME"; \
-	    exit 1; } || true
-	$(KAGGLE) kernels push -p notebooks/
+	@$(VENV_PY) -c "import os, sys, subprocess; token_file = '.kaggle/access_token'; env = dict(os.environ); (env.update({'KAGGLE_API_TOKEN': open(token_file).read().strip()}) if os.path.exists(token_file) else None); kaggle_bin = r'$(VENV_BIN)/kaggle.exe' if os.name == 'nt' else r'$(VENV_BIN)/kaggle'; res = subprocess.run([kaggle_bin, 'kernels', 'push', '-p', 'notebooks/'], env=env); sys.exit(res.returncode)"
 	@echo ""
 	@echo "Pushed. Track it with:  make status"
 
 status: _check-kaggle ## Show the status of your most recent Kaggle kernel run
-	@KERNEL_ID=$$(python3 -c "import json; print(json.load(open('notebooks/kernel-metadata.json'))['id'])"); \
-	$(KAGGLE) kernels status $$KERNEL_ID
+	@$(VENV_PY) -c "import os, json, sys, subprocess; token_file = '.kaggle/access_token'; env = dict(os.environ); (env.update({'KAGGLE_API_TOKEN': open(token_file).read().strip()}) if os.path.exists(token_file) else None); kaggle_bin = r'$(VENV_BIN)/kaggle.exe' if os.name == 'nt' else r'$(VENV_BIN)/kaggle'; kernel_id = json.load(open('notebooks/kernel-metadata.json'))['id']; res = subprocess.run([kaggle_bin, 'kernels', 'status', kernel_id], env=env); sys.exit(res.returncode)"
 
 clean: ## Remove generated artefacts (venv, downloaded games, vendored repos)
 	rm -rf $(VENV) vendor environment_files recordings notebooks/submission.ipynb \

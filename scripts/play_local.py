@@ -37,6 +37,7 @@ def load_my_agent_class():
     if spec is None or spec.loader is None:
         raise SystemExit("Could not load agent/my_agent.py")
     module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     if not hasattr(module, "MyAgent"):
         raise SystemExit("agent/my_agent.py must define a class named `MyAgent`")
@@ -87,7 +88,7 @@ def main() -> None:
 
     MyAgentCls = load_my_agent_class()
     if hasattr(MyAgentCls, "MAX_ACTIONS"):
-        MyAgentCls.MAX_ACTIONS = min(MyAgentCls.MAX_ACTIONS, args.max_steps)
+        MyAgentCls.MAX_ACTIONS = args.max_steps
 
     per_game = []
     for i, game_id in enumerate(game_ids, 1):
@@ -111,7 +112,7 @@ def main() -> None:
         final = agent.frames[-1]
         per_game.append((game_id, final.state, final.levels_completed,
                          agent.action_counter))
-        print(f"  → state={final.state}, levels_completed={final.levels_completed}, "
+        print(f"  -> state={final.state}, levels_completed={final.levels_completed}, "
               f"actions={agent.action_counter}")
 
     sc = arc.get_scorecard()

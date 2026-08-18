@@ -76,6 +76,643 @@ def build() -> dict:
     write_agent_cell = code_cell(
         "%%writefile /tmp/my_agent.py\n" + agent_body
     )
+    # --- INJECT OLLAMA SETUP CELL ---
+    ollama_cell_source = dedent(
+        '''\
+        import os
+        import sys
+        import time
+        import glob
+        import shutil
+        import subprocess
+        import urllib.request
+        import urllib.error
+        import json
+
+        print("=== DEWMA Full Ollama Distribution Test ===")
+
+        OLLAMA_HOST = "127.0.0.1:11434"
+        MODEL_TAG = "gemma4:e4b"
+        OLLAMA_LOG = "/tmp/ollama.log"
+        MODELFILE_PATH = "/tmp/Modelfile"
+
+
+        def print_ollama_log(max_characters=10000):
+            print("\\n=== Ollama Server Log ===")
+
+            if not os.path.exists(OLLAMA_LOG):
+                print("Ollama log does not exist.")
+                return
+
+            try:
+                with open(
+                    OLLAMA_LOG,
+                    "r",
+                    encoding="utf-8",
+                    errors="replace",
+                ) as log_file:
+                    content = log_file.read()
+
+                print(content[-max_characters:])
+
+            except Exception as log_error:
+                print(f"Could not read Ollama log: {log_error}")
+
+
+        def find_library_directories(root_directory):
+            """
+            Find every directory containing at least one Linux shared library.
+            """
+            library_directories = []
+
+            for root, _, files in os.walk(root_directory):
+                contains_shared_library = any(
+                    filename.endswith(".so") or ".so." in filename
+                    for filename in files
+                )
+
+                if contains_shared_library:
+                    library_directories.append(root)
+
+            return sorted(set(library_directories))
+
+
+        def restore_shared_library_symlinks(library_root):
+            """
+            Restore missing SONAME symbolic links.
+
+            Kaggle datasets may not preserve symbolic links. For example:
+
+                libllama-common.so.0.1.0
+
+            may exist while the required SONAME link is missing:
+
+                libllama-common.so.0 -> libllama-common.so.0.1.0
+            """
+            created_links = []
+
+            for root, _, files in os.walk(library_root):
+                for filename in files:
+                    file_path = os.path.join(root, filename)
+
+                    if not os.path.isfile(file_path):
+                        continue
+
+                    if ".so." not in filename:
+                        continue
+
+                    readelf_result = subprocess.run(
+                        ["readelf", "-d", file_path],
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.DEVNULL,
+                        text=True,
+                        check=False,
+                    )
+
+                    soname = None
+
+                    for line in readelf_result.stdout.splitlines():
+                        if (
+                            "(SONAME)" in line
+                            and "[" in line
+                            and "]" in line
+                        ):
+                            soname = (
+                                line.split("[", 1)[1]
+                                .split("]", 1)[0]
+                                .strip()
+                            )
+                            break
+
+                    if not soname:
+                        continue
+
+                    soname_path = os.path.join(root, soname)
+
+                    if os.path.lexists(soname_path):
+                        continue
+
+                    # Relative target keeps the copied distribution portable.
+                    os.symlink(filename, soname_path)
+
+                    created_links.append(
+                        {
+                            "link": soname_path,
+                            "target": filename,
+                        }
+                    )
+
+            return created_links
+
+
+        def wait_for_server(timeout_seconds=30):
+            deadline = time.time() + timeout_seconds
+            last_error = None
+
+            while time.time() < deadline:
+                try:
+                    with urllib.request.urlopen(
+                        f"http://{OLLAMA_HOST}/api/tags",
+                        timeout=2,
+                    ) as response:
+                        if response.status == 200:
+                            return True
+
+                except Exception as error:
+                    last_error = error
+                    time.sleep(1)
+
+            print(f"Last server connection error: {last_error}")
+            return False
+
+
+        def list_unresolved_dependencies(executable_path, environment):
+            dependency_check = subprocess.run(
+                ["ldd", executable_path],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                env=environment,
+                check=False,
+            )
+
+            print("\\n=== llama-server Dependency Check ===")
+            print(dependency_check.stdout)
+
+            unresolved = [
+                line.strip()
+                for line in dependency_check.stdout.splitlines()
+                if "not found" in line
+            ]
+
+            return unresolved
+
+
+        server_process = None
+        log_handle = None
+
+        try:
+            # -------------------------------------------------------------
+            # 0. Stop processes left behind by previous Kaggle cells
+            # -------------------------------------------------------------
+            subprocess.run(
+                ["pkill", "-x", "ollama"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+
+            subprocess.run(
+                ["pkill", "-x", "llama-server"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+
+            time.sleep(2)
+
+            # Remove stale log output from previous executions.
+            with open(OLLAMA_LOG, "w"):
+                pass
+
+            # -------------------------------------------------------------
+            # 1. Locate the complete offline Ollama distribution
+            # -------------------------------------------------------------
+            offline_binaries = glob.glob(
+                "/kaggle/input/**/bin/ollama",
+                recursive=True,
+            )
+
+            if not offline_binaries:
+                raise FileNotFoundError(
+                    "Full Ollama distribution was not found. "
+                    "Attach a dataset containing bin/ollama and lib/ollama."
+                )
+
+            source_binary = offline_binaries[0]
+
+            source_distribution = os.path.dirname(
+                os.path.dirname(source_binary)
+            )
+
+            destination_distribution = "/tmp/dist/linux-amd64"
+
+            print(f"Source distribution: {source_distribution}")
+
+            if os.path.exists(destination_distribution):
+                shutil.rmtree(destination_distribution)
+
+            shutil.copytree(
+                source_distribution,
+                destination_distribution,
+                symlinks=True,
+            )
+
+            ollama_binary = os.path.join(
+                destination_distribution,
+                "bin",
+                "ollama",
+            )
+
+            ollama_library_root = os.path.join(
+                destination_distribution,
+                "lib",
+                "ollama",
+            )
+
+            if not os.path.isfile(ollama_binary):
+                raise FileNotFoundError(
+                    f"Ollama executable is missing: {ollama_binary}"
+                )
+
+            if not os.path.isdir(ollama_library_root):
+                raise FileNotFoundError(
+                    f"Ollama library directory is missing: "
+                    f"{ollama_library_root}"
+                )
+
+            print(f"Copied distribution to: {destination_distribution}")
+            print(f"Ollama binary: {ollama_binary}")
+            print(f"Ollama library root: {ollama_library_root}")
+
+            # -------------------------------------------------------------
+            # 2. Set file permissions
+            # -------------------------------------------------------------
+            os.chmod(ollama_binary, 0o755)
+
+            for root, directories, files in os.walk(ollama_library_root):
+                os.chmod(root, 0o755)
+
+                for directory in directories:
+                    directory_path = os.path.join(root, directory)
+                    os.chmod(directory_path, 0o755)
+
+                for filename in files:
+                    file_path = os.path.join(root, filename)
+
+                    # Do not replace a library symlink's target permissions.
+                    if os.path.islink(file_path):
+                        continue
+
+                    try:
+                        os.chmod(file_path, 0o755)
+                    except FileNotFoundError:
+                        pass
+
+            # -------------------------------------------------------------
+            # 3. Restore library links lost during Kaggle dataset upload
+            # -------------------------------------------------------------
+            print("\\nRestoring shared-library SONAME links...")
+
+            restored_links = restore_shared_library_symlinks(
+                ollama_library_root
+            )
+
+            if restored_links:
+                print(f"Restored {len(restored_links)} library links:")
+
+                for restored_link in restored_links:
+                    print(
+                        f"  - {os.path.basename(restored_link['link'])}"
+                        f" -> {restored_link['target']}"
+                    )
+            else:
+                print("No missing SONAME links were detected.")
+
+            # -------------------------------------------------------------
+            # 4. Build LD_LIBRARY_PATH
+            # -------------------------------------------------------------
+            library_directories = find_library_directories(
+                ollama_library_root
+            )
+
+            library_directories.insert(0, ollama_library_root)
+            library_directories = list(
+                dict.fromkeys(library_directories)
+            )
+
+            existing_ld_library_path = os.environ.get(
+                "LD_LIBRARY_PATH",
+                "",
+            )
+
+            combined_library_path = os.pathsep.join(
+                library_directories
+            )
+
+            if existing_ld_library_path:
+                combined_library_path += (
+                    os.pathsep + existing_ld_library_path
+                )
+
+            os.environ["LD_LIBRARY_PATH"] = combined_library_path
+            os.environ["OLLAMA_RUNNERS_DIR"] = ollama_library_root
+            os.environ["OLLAMA_HOST"] = OLLAMA_HOST
+            os.environ["OLLAMA_NUM_PARALLEL"] = "1"
+            os.environ["OLLAMA_CONTEXT_LENGTH"] = "2048"
+            os.environ["OLLAMA_KEEP_ALIVE"] = "0"
+
+            os.environ["PATH"] = (
+                os.path.join(destination_distribution, "bin")
+                + os.pathsep
+                + os.environ.get("PATH", "")
+            )
+
+            server_environment = os.environ.copy()
+
+            print(
+                f"Library directories configured: "
+                f"{len(library_directories)}"
+            )
+
+            for library_directory in library_directories:
+                print(f"  - {library_directory}")
+
+            # -------------------------------------------------------------
+            # 5. Verify required libraries
+            # -------------------------------------------------------------
+            required_library_names = [
+                "libllama-common.so.0",
+                "libmtmd.so.0",
+                "libllama.so.0",
+                "libggml.so.0",
+                "libggml-base.so.0",
+            ]
+
+            print("\\nChecking required Ollama libraries...")
+
+            missing_required_libraries = []
+
+            for required_name in required_library_names:
+                matches = glob.glob(
+                    os.path.join(
+                        ollama_library_root,
+                        "**",
+                        required_name,
+                    ),
+                    recursive=True,
+                )
+
+                if matches:
+                    print(f"  ✅ {required_name}: {matches[0]}")
+                else:
+                    print(f"  ❌ {required_name}: missing")
+                    missing_required_libraries.append(required_name)
+
+            if missing_required_libraries:
+                raise FileNotFoundError(
+                    "Required shared libraries are missing: "
+                    + ", ".join(missing_required_libraries)
+                )
+
+            # -------------------------------------------------------------
+            # 6. Locate llama-server
+            # -------------------------------------------------------------
+            llama_server_candidates = glob.glob(
+                os.path.join(
+                    ollama_library_root,
+                    "**",
+                    "llama-server",
+                ),
+                recursive=True,
+            )
+
+            if not llama_server_candidates:
+                raise FileNotFoundError(
+                    "No llama-server executable was found under lib/ollama."
+                )
+
+            llama_server_binary = llama_server_candidates[0]
+            os.chmod(llama_server_binary, 0o755)
+
+            print(f"\\nllama-server: {llama_server_binary}")
+
+            unresolved_dependencies = list_unresolved_dependencies(
+                llama_server_binary,
+                server_environment,
+            )
+
+            if unresolved_dependencies:
+                print("❌ Unresolved llama-server dependencies:")
+
+                for dependency in unresolved_dependencies:
+                    print(f"  {dependency}")
+
+                raise RuntimeError(
+                    "llama-server still has unresolved shared-library "
+                    "dependencies."
+                )
+
+            print("llama-server dependency check passed ✅")
+
+            # -------------------------------------------------------------
+            # 7. Locate the GGUF model
+            # -------------------------------------------------------------
+            gguf_candidates = glob.glob(
+                "/kaggle/input/**/*.gguf",
+                recursive=True,
+            )
+
+            if not gguf_candidates:
+                raise FileNotFoundError(
+                    "No GGUF model was found under /kaggle/input."
+                )
+
+            preferred_candidates = [
+                path
+                for path in gguf_candidates
+                if "gemma4" in path.lower()
+                or "e4b" in path.lower()
+            ]
+
+            gguf_path = (
+                preferred_candidates[0]
+                if preferred_candidates
+                else gguf_candidates[0]
+            )
+
+            gguf_size_gib = os.path.getsize(gguf_path) / (1024 ** 3)
+
+            print(f"\\nSelected GGUF: {gguf_path}")
+            print(f"GGUF size: {gguf_size_gib:.2f} GiB")
+
+            # -------------------------------------------------------------
+            # 8. Start Ollama using the corrected environment
+            # -------------------------------------------------------------
+            print("\\nStarting Ollama server...")
+
+            log_handle = open(
+                OLLAMA_LOG,
+                "w",
+                encoding="utf-8",
+            )
+
+            server_process = subprocess.Popen(
+                [ollama_binary, "serve"],
+                stdout=log_handle,
+                stderr=subprocess.STDOUT,
+                env=server_environment,
+            )
+
+            if not wait_for_server(timeout_seconds=30):
+                if server_process.poll() is not None:
+                    print(
+                        f"Ollama process exited with code "
+                        f"{server_process.returncode}."
+                    )
+
+                if log_handle:
+                    log_handle.flush()
+
+                print_ollama_log()
+
+                raise RuntimeError(
+                    "Ollama did not become ready within 30 seconds."
+                )
+
+            print("Ollama daemon connected on port 11434 ✅")
+
+            # -------------------------------------------------------------
+            # 9. Create the local Ollama model
+            # -------------------------------------------------------------
+            with open(
+                MODELFILE_PATH,
+                "w",
+                encoding="utf-8",
+            ) as model_file:
+                model_file.write(f'FROM "{gguf_path}"\\n')
+                model_file.write("PARAMETER num_ctx 2048\\n")
+                model_file.write("PARAMETER temperature 0\\n")
+
+            print(f"\\nCreating model tag '{MODEL_TAG}'...")
+
+            create_result = subprocess.run(
+                [
+                    ollama_binary,
+                    "create",
+                    MODEL_TAG,
+                    "-f",
+                    MODELFILE_PATH,
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                env=server_environment,
+                check=False,
+            )
+
+            print(create_result.stdout)
+
+            if create_result.returncode != 0:
+                if log_handle:
+                    log_handle.flush()
+
+                print_ollama_log()
+
+                raise RuntimeError(
+                    f"ollama create failed with exit code "
+                    f"{create_result.returncode}."
+                )
+
+            print(f"Ollama model '{MODEL_TAG}' registered ✅")
+
+            # -------------------------------------------------------------
+            # 10. Test real model loading and generation
+            # -------------------------------------------------------------
+            print("\\nLoading model and testing generation...")
+
+            request_body = {
+                "model": MODEL_TAG,
+                "prompt": (
+                    "Reply with exactly the single word CONNECTED "
+                    "and nothing else."
+                ),
+                "stream": False,
+                "keep_alive": 0,
+                "options": {
+                    "temperature": 0.0,
+                    "num_ctx": 2048,
+                    "num_predict": 10,
+                },
+            }
+
+            request = urllib.request.Request(
+                f"http://{OLLAMA_HOST}/api/generate",
+                data=json.dumps(request_body).encode("utf-8"),
+                headers={
+                    "Content-Type": "application/json",
+                },
+                method="POST",
+            )
+
+            # Initial CPU model loading may take several minutes.
+            with urllib.request.urlopen(
+                request,
+                timeout=300,
+            ) as response:
+                result = json.loads(
+                    response.read().decode("utf-8")
+                )
+
+            generated_text = result.get("response", "").strip()
+
+            print(f"✅ LLM response: {generated_text}")
+            print(f"Load duration: {result.get('load_duration')}")
+            print(f"Prompt tokens: {result.get('prompt_eval_count')}")
+            print(f"Generated tokens: {result.get('eval_count')}")
+            print("\\n=== FULL OLLAMA TEST PASSED ===")
+
+        except urllib.error.HTTPError as error:
+            print(f"\\n❌ HTTP Error {error.code}: {error.reason}")
+
+            try:
+                error_body = error.read().decode(
+                    "utf-8",
+                    errors="replace",
+                )
+                print(f"API error body: {error_body}")
+            except Exception:
+                pass
+
+            if log_handle:
+                log_handle.flush()
+
+            print_ollama_log()
+
+        except urllib.error.URLError as error:
+            print(f"\\n❌ Connection error: {error}")
+
+            if log_handle:
+                log_handle.flush()
+
+            print_ollama_log()
+
+        except FileNotFoundError as error:
+            print(f"\\n❌ Required file or command missing: {error}")
+
+            if log_handle:
+                log_handle.flush()
+
+            print_ollama_log()
+
+        except Exception as error:
+            print(f"\\n❌ Ollama test failed: {error}")
+
+            if log_handle:
+                log_handle.flush()
+
+            print_ollama_log()
+
+        finally:
+            # Keep Ollama running after a successful test.
+            # Only close this notebook's Python handle to the log file.
+            if log_handle:
+                log_handle.flush()
+                log_handle.close()
+
+        '''
+    )
+    ollama_setup_cell = code_cell(ollama_cell_source)
 
     run_cell_source = dedent(
         """\
@@ -183,13 +820,14 @@ def build() -> dict:
         "nbformat": 4,
         "cells": [
             markdown_cell(
-                "# ARC Prize 2026 — ARC-AGI-3 Submission\n\n"
+                "# GeminiAgent_V1\n\n"
                 "Built from `agent/my_agent.py` via `scripts/build_notebook.py`. "
                 "Do not edit cells directly — edit the source file and re-run "
                 "`make submit`."
             ),
             install_cell,
             write_agent_cell,
+            ollama_setup_cell,
             run_cell,
             dummy_submission_cell,
         ],

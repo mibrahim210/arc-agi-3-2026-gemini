@@ -20,3 +20,10 @@ reference/
 .DS_Store
 .idea/
 .vscode/
+
+# Local traces, logs, and datasets
+traces/
+notebooks/log_output/
+agent/*.tgz
+datasets/
+diff_changes.txt
