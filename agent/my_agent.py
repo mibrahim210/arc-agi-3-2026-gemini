@@ -114,7 +114,7 @@ def _env_float(name: str, default: float) -> float:
 
 @dataclass(slots=True)
 class Config:
-    max_actions: int = _env_int("DEWMA_MAX_ACTIONS", 400)
+    max_actions: int = _env_int("DEWMA_MAX_ACTIONS", 600)
     enable_entities: bool = _env_bool("DEWMA_ENTITIES", True)
     enable_spatial_hash: bool = _env_bool("DEWMA_SPATIAL_HASH", True)
     enable_dead_signatures: bool = _env_bool("DEWMA_DEAD_SIGNATURES", True)
@@ -2483,6 +2483,63 @@ class WorldProgram:
             for src, dst in self.payload.get("mapping", {}).items():
                 result[original == int(src)] = int(dst)
             return result
+        if self.kind == "rot90":
+            return np.rot90(grid, k=int(self.payload.get("k", 1)))
+        if self.kind == "flip_h":
+            return np.fliplr(grid)
+        if self.kind == "flip_v":
+            return np.flipud(grid)
+        if self.kind == "line_connect":
+            x1, y1 = self.payload.get("p1", (0, 0))
+            x2, y2 = self.payload.get("p2", (0, 0))
+            color = int(self.payload.get("color", 1))
+            result = grid.copy()
+            dx, dy = abs(x2 - x1), abs(y2 - y1)
+            sx = 1 if x1 < x2 else -1
+            sy = 1 if y1 < y2 else -1
+            err = dx - dy
+            cx, cy = x1, y1
+            while True:
+                if 0 <= cx < grid.shape[1] and 0 <= cy < grid.shape[0]:
+                    result[cy, cx] = color
+                if cx == x2 and cy == y2:
+                    break
+                e2 = 2 * err
+                if e2 > -dy:
+                    err -= dy
+                    cx += sx
+                if e2 < dx:
+                    err += dx
+                    cy += sy
+            return result
+        if self.kind == "drag_component":
+            x1, y1 = self.payload.get("p1", (0, 0))
+            x2, y2 = self.payload.get("p2", (0, 0))
+            dx, dy = x2 - x1, y2 - y1
+            if not (0 <= x1 < grid.shape[1] and 0 <= y1 < grid.shape[0]):
+                return None
+            color = int(grid[y1, x1])
+            result = grid.copy()
+            stack = [(x1, y1)]
+            seen: set[Point] = set()
+            comp_pts: list[Point] = []
+            while stack:
+                cx, cy = stack.pop()
+                if (cx, cy) in seen or not (0 <= cx < grid.shape[1] and 0 <= cy < grid.shape[0]):
+                    continue
+                if int(grid[cy, cx]) != color:
+                    continue
+                seen.add((cx, cy))
+                comp_pts.append((cx, cy))
+                stack.extend(((cx+1, cy), (cx-1, cy), (cx, cy+1), (cx, cy-1)))
+            bg = int(self.payload.get("background", 0))
+            for cx, cy in comp_pts:
+                result[cy, cx] = bg
+            for cx, cy in comp_pts:
+                nx, ny = cx + dx, cy + dy
+                if 0 <= nx < grid.shape[1] and 0 <= ny < grid.shape[0]:
+                    result[ny, nx] = color
+            return result
         if self.kind in {"component_delete", "component_recolor"}:
             anchor = self._anchor(grid, action, scene)
             assert anchor is not None
@@ -2663,6 +2720,18 @@ class ExecutableProgramLibrary:
                         },
                     )
                 )
+
+        # Rotations and Symmetry Flips
+        if after.grid.shape == before.grid.shape:
+            for k in (1, 2, 3):
+                if np.array_equal(np.rot90(before.grid, k=k), after.grid):
+                    candidates.append(self._make("rot90", action.name, {"k": k}))
+            if np.array_equal(np.fliplr(before.grid), after.grid):
+                candidates.append(self._make("flip_h", action.name, {}))
+            if np.array_equal(np.flipud(before.grid), after.grid):
+                candidates.append(self._make("flip_v", action.name, {}))
+            if np.all(before.grid + after.grid == 9):
+                candidates.append(self._make("color_invert", action.name, {"max_color": 9}))
 
         changed = np.where(before.grid != after.grid)
         mapping: dict[int, int] = {}
@@ -3684,12 +3753,19 @@ class OptionalLocalReasoner:
     def _load(self) -> bool:
         if self._model is not None:
             return True
-        # Ping local Ollama server
+        # Ping local Ollama server and auto-detect active model tag
         import urllib.request
+        import json
         try:
             req = urllib.request.Request("http://127.0.0.1:11434/api/tags", method="GET")
             with urllib.request.urlopen(req, timeout=3) as resp:
                 if resp.status == 200:
+                    data = json.loads(resp.read().decode('utf-8'))
+                    models = data.get("models", [])
+                    if models:
+                        self.detected_tag = models[0].get("name")
+                    else:
+                        self.detected_tag = os.environ.get("DEWMA_MODEL_TAG", "qwen2.5-coder:7b")
                     self._model = "ollama"
                     return True
         except Exception:
@@ -3761,7 +3837,7 @@ class OptionalLocalReasoner:
                 req = urllib.request.Request(
                     "http://127.0.0.1:11434/api/generate",
                     data=json.dumps({
-                        "model": "gemma4:e4b",
+                        "model": getattr(self, "detected_tag", os.environ.get("DEWMA_MODEL_TAG", "qwen2.5-coder:7b")),
                         "prompt": prompt,
                         "stream": False,
                         "options": {
@@ -3775,6 +3851,7 @@ class OptionalLocalReasoner:
                 with urllib.request.urlopen(req, timeout=60) as resp:
                     result = json.loads(resp.read().decode('utf-8'))
                     text = result.get("response", "").strip()
+                print(f"[Ollama LLM Call #{self.calls}] Tag: {getattr(self, 'detected_tag', 'unknown')} | Latency: {time.monotonic()-started:.2f}s | Output: {text[:80]}...", file=sys.stderr)
                 return self._extract_json(text)
             else:
                 # In-process llama_cpp inference
@@ -3879,7 +3956,7 @@ class OptionalLocalReasoner:
                 except Exception as exc:
                     prompt += (
                         f"python_{round_index + 1}_error={type(exc).__name__}:"
-                        f"{str(exc)[:180]}\nReturn final action JSON now.\n"
+                        f"{str(exc)[:180]}\nFix your python script or return the final action JSON.\n"
                     )
                 continue
 
@@ -4022,6 +4099,31 @@ class CandidateGenerator:
     def reset_level(self) -> None:
         self.coordinate_visits.clear()
 
+    def _extract_object_centric_anchors(self, scene: Scene) -> list[tuple[float, Point, str]]:
+        anchors: list[tuple[float, Point, str]] = []
+        try:
+            from scipy.ndimage import label
+            non_bg = (scene.grid != scene.background)
+            labeled, num_features = label(non_bg)
+            for obj_id in range(1, min(num_features + 1, 24)):
+                ys, xs = np.where(labeled == obj_id)
+                if len(xs) == 0:
+                    continue
+                cx = int(round(float(np.mean(xs))))
+                cy = int(round(float(np.mean(ys))))
+                min_x, max_x = int(np.min(xs)), int(np.max(xs))
+                min_y, max_y = int(np.min(ys)), int(np.max(ys))
+                bx = (min_x + max_x) // 2
+                by = (min_y + max_y) // 2
+                score_c = 1.75 - 0.15 * self.coordinate_visits[(cx, cy)]
+                anchors.append((score_c, (cx, cy), "object_centroid_anchor"))
+                if (bx, by) != (cx, cy):
+                    score_b = 1.60 - 0.15 * self.coordinate_visits[(bx, by)]
+                    anchors.append((score_b, (bx, by), "object_bbox_center"))
+        except Exception:
+            pass
+        return anchors
+
     def _complex_coordinates(self, scene: Scene) -> list[tuple[float, Point, str]]:
         total = max(1, scene.grid.size)
         color_freq = {color: count / total for color,
@@ -4080,6 +4182,43 @@ class CandidateGenerator:
                 mid_y = (int(ys[0]) + int(ys[1])) // 2
                 point = (mid_x, mid_y)
                 proposals.append((1.8 - 0.12 * self.coordinate_visits[point], point, "pair_midpoint_anchor"))
+
+        # Color Boundary Entropy Anchors (Transitions between distinct colors)
+        try:
+            grid = scene.grid
+            h_boundaries = (grid[:, :-1] != grid[:, 1:])
+            v_boundaries = (grid[:-1, :] != grid[1:, :])
+            hy, hx = np.where(h_boundaries)
+            vy, vx = np.where(v_boundaries)
+            for x, y in zip(hx[:24], hy[:24]):
+                p = (int(x), int(y))
+                proposals.append((1.15 - 0.15 * self.coordinate_visits[p], p, "color_boundary_anchor"))
+            for x, y in zip(vx[:24], vy[:24]):
+                p = (int(x), int(y))
+                proposals.append((1.15 - 0.15 * self.coordinate_visits[p], p, "color_boundary_anchor"))
+        except Exception:
+            pass
+
+        # Object Centroid & Bounding Box Center Anchors
+        centroids = self._extract_object_centric_anchors(scene)
+        proposals.extend(centroids)
+
+        # 2-Point Pair Macro Generator (Source Object -> Target Slot / Midpoint)
+        try:
+            if centroids:
+                # Top source anchor (first component/object centroid)
+                s_score, (sx, sy), s_why = centroids[0]
+                # High-confidence destination targets (grid center, opposite corner, pair midpoint)
+                dests = [
+                    (scene.width // 2, scene.height // 2),
+                    (max(0, scene.width - sx - 1), max(0, scene.height - sy - 1)),
+                ]
+                for dx, dy in dests:
+                    if (dx, dy) != (sx, sy):
+                        macro_score = 2.40 - 0.15 * self.coordinate_visits[(sx, sy)]
+                        proposals.append((macro_score, (sx, sy), f"macro_pair_src:dest=({dx},{dy})"))
+        except Exception:
+            pass
 
 
         # Stagnation boost: when in a recent state loop or NO-OP streak, boost unvisited frontier locations
@@ -4157,6 +4296,7 @@ class CandidateGenerator:
                     is_noop_hyp = hypothesis_known and hypothesis_effect == "noop"
                     is_noop_hash = known and effect == "noop"
                     noop_history_count = self.dead.noops.get(signature, 0)
+                    
                     score = (
                         coord_score
                         + (1.2 * confidence if not is_noop_hash else -2.0 * confidence)
@@ -4789,11 +4929,12 @@ class MetacognitiveController:
 class MyAgent(Agent):
     """DEWMA-ARC v4 agent with level-scoped alignment and global runtime control."""
 
-    MAX_ACTIONS = _env_int("DEWMA_MAX_ACTIONS", 400)
+    MAX_ACTIONS = _env_int("DEWMA_MAX_ACTIONS", 600)
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self.config = Config(max_actions=self.MAX_ACTIONS)
+        self.macro_queue: deque[ActionSpec] = deque()
         self.dynamics = ActionDynamics()
         self._construct_modules()
         self.pending_scene: Scene | None = None
@@ -5139,6 +5280,15 @@ class MyAgent(Agent):
                 legal_actions,
                 {"stage": "controlled_stagnation_reset",
                     "noop_streak": self.memory.no_op_streak},
+            )
+
+        # Process queued 2-step macro action if present
+        if self.macro_queue:
+            next_spec = self.macro_queue.popleft()
+            return self._to_game_action(
+                next_spec,
+                legal_actions,
+                {"stage": "macro_step_2_execution", "queue_len": len(self.macro_queue)},
             )
 
         runtime_tier = self.runtime.tier()

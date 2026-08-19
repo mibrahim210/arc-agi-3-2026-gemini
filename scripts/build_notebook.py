@@ -92,7 +92,7 @@ def build() -> dict:
         print("=== DEWMA Full Ollama Distribution Test ===")
 
         OLLAMA_HOST = "127.0.0.1:11434"
-        MODEL_TAG = "gemma4:e4b"
+        MODEL_TAG = "qwen2.5-coder:7b"
         OLLAMA_LOG = "/tmp/ollama.log"
         MODELFILE_PATH = "/tmp/Modelfile"
 
@@ -278,22 +278,29 @@ def build() -> dict:
             # -------------------------------------------------------------
             # 1. Locate the complete offline Ollama distribution
             # -------------------------------------------------------------
-            offline_binaries = glob.glob(
-                "/kaggle/input/**/bin/ollama",
-                recursive=True,
-            )
+            all_candidates = glob.glob("/kaggle/input/**/ollama", recursive=True)
+            offline_binaries = [
+                p for p in all_candidates
+                if os.path.isfile(p) and not p.endswith(".py") and not p.endswith(".sh") and not p.endswith(".gguf")
+            ]
 
             if not offline_binaries:
+                print("=== Debug: Listing all files under /kaggle/input ===")
+                for root_dir, _, files in os.walk("/kaggle/input"):
+                    for file_name in files:
+                        print(os.path.join(root_dir, file_name))
                 raise FileNotFoundError(
-                    "Full Ollama distribution was not found. "
-                    "Attach a dataset containing bin/ollama and lib/ollama."
+                    "Ollama binary was not found under /kaggle/input. "
+                    "Ensure dataset containing ollama binary is attached."
                 )
 
             source_binary = offline_binaries[0]
+            print(f"Found Ollama binary at: {source_binary}")
 
-            source_distribution = os.path.dirname(
-                os.path.dirname(source_binary)
-            )
+            if os.path.basename(os.path.dirname(source_binary)) == "bin":
+                source_distribution = os.path.dirname(os.path.dirname(source_binary))
+            else:
+                source_distribution = os.path.dirname(source_binary)
 
             destination_distribution = "/tmp/dist/linux-amd64"
 
@@ -308,28 +315,13 @@ def build() -> dict:
                 symlinks=True,
             )
 
-            ollama_binary = os.path.join(
-                destination_distribution,
-                "bin",
-                "ollama",
-            )
+            # Locate copied binary and library root
+            copied_candidates = glob.glob(f"{destination_distribution}/**/ollama", recursive=True)
+            copied_files = [p for p in copied_candidates if os.path.isfile(p) and not p.endswith(".py") and not p.endswith(".sh") and not p.endswith(".gguf")]
+            ollama_binary = copied_files[0] if copied_files else os.path.join(destination_distribution, "ollama")
 
-            ollama_library_root = os.path.join(
-                destination_distribution,
-                "lib",
-                "ollama",
-            )
-
-            if not os.path.isfile(ollama_binary):
-                raise FileNotFoundError(
-                    f"Ollama executable is missing: {ollama_binary}"
-                )
-
-            if not os.path.isdir(ollama_library_root):
-                raise FileNotFoundError(
-                    f"Ollama library directory is missing: "
-                    f"{ollama_library_root}"
-                )
+            lib_candidates = glob.glob(f"{destination_distribution}/**/lib/ollama", recursive=True) + glob.glob(f"{destination_distribution}/**/runners", recursive=True)
+            ollama_library_root = lib_candidates[0] if lib_candidates else destination_distribution
 
             print(f"Copied distribution to: {destination_distribution}")
             print(f"Ollama binary: {ollama_binary}")
@@ -521,7 +513,9 @@ def build() -> dict:
             preferred_candidates = [
                 path
                 for path in gguf_candidates
-                if "gemma4" in path.lower()
+                if "qwen" in path.lower()
+                or "coder" in path.lower()
+                or "gemma4" in path.lower()
                 or "e4b" in path.lower()
             ]
 
@@ -760,6 +754,7 @@ def build() -> dict:
         OPERATION_MODE=online
         ENVIRONMENTS_DIR=
         RECORDINGS_DIR=/kaggle/working/server_recording
+        DEWMA_MODEL_TAG=qwen2.5-coder:7b
         \"\"\")
 
             # Run it. The gateway records every action and emits submission.parquet.

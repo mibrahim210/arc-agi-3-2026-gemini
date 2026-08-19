@@ -10,8 +10,8 @@
   "enable_internet": false,
   "keywords": [],
   "dataset_sources": [
-    "plasmacoder210/gemma4-e4b-gguf",
-    "plasmacoder210/ollama-linux-binary"
+    "plasmacoder210/qwen25-coder-7b-gguf",
+    "plasmacoder210/ollama-linux-v0-32-14"
   ],
   "kernel_sources": [],
   "competition_sources": [
