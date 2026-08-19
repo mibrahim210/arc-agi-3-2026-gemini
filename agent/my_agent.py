@@ -1,4 +1,4 @@
-"""DEWMA-ARC v4 runtime/alignment hardened: full developmental epistemic world-model ARC-AGI-3 agent.
+"""DEWMA-ARC v4.1 runtime/alignment hardened: Qwen2.5-Coder model integrated ARC-AGI-3 agent.
 
 Drop-in replacement for ``agent/my_agent.py`` in the official
 ARC-AGI-3 Kaggle Starter.
