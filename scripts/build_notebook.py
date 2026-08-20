@@ -753,7 +753,7 @@ def build() -> dict:
         ARC_BASE_URL=http://gateway:8001/
         OPERATION_MODE=online
         ENVIRONMENTS_DIR=
-        RECORDINGS_DIR=/kaggle/working/server_recording
+                RECORDINGS_DIR=/kaggle/working/server_recording
         DEWMA_MODEL_TAG=qwen2.5-coder:7b
         \"\"\")
 
@@ -761,6 +761,12 @@ def build() -> dict:
             !cd /kaggle/working/ARC-AGI-3-Agents && \\
                 MPLBACKEND=agg \\
                 python main.py --agent myagent
+
+            # Ensure submission.parquet is placed at root working directory
+            !if [ -f /kaggle/working/ARC-AGI-3-Agents/submission.parquet ]; then \\
+                cp /kaggle/working/ARC-AGI-3-Agents/submission.parquet /kaggle/working/submission.parquet; \\
+                echo "Copied submission.parquet to /kaggle/working/ ✅"; \\
+            fi
         """
     )
     run_cell = code_cell(run_cell_source)

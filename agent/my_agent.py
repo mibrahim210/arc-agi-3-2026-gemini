@@ -260,9 +260,9 @@ class Config:
     trace_dir: str = os.getenv("DEWMA_TRACE_DIR", "./traces")
     trace_max_records: int = _env_int("DEWMA_TRACE_MAX_RECORDS", 2048)
     session_limit_sec: int = _env_int(
-        "DEWMA_SESSION_LIMIT_SEC", int(11.5 * 3600))
+        "DEWMA_SESSION_LIMIT_SEC", int(8.0 * 3600))
     finalization_reserve_sec: int = _env_int(
-        "DEWMA_FINALIZATION_RESERVE_SEC", 1200)
+        "DEWMA_FINALIZATION_RESERVE_SEC", 1800)
     runtime_a7_ratio: float = _env_float("DEWMA_RUNTIME_A7_RATIO", 0.35)
     runtime_a5_ratio: float = _env_float("DEWMA_RUNTIME_A5_RATIO", 0.20)
     runtime_required_margin_ratio: float = _env_float(
