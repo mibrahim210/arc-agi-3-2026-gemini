@@ -768,6 +768,13 @@ def build() -> dict:
                 cp /kaggle/working/ARC-AGI-3-Agents/submission.parquet /kaggle/working/submission.parquet; \\
                 echo "Copied submission.parquet to /kaggle/working/ ✅"; \\
             fi
+
+            import glob, shutil
+            sub_files = glob.glob('/kaggle/working/**/submission.parquet', recursive=True)
+            for sf in sub_files:
+                if sf != '/kaggle/working/submission.parquet':
+                    shutil.copy(sf, '/kaggle/working/submission.parquet')
+                    print(f"Python fallback: copied {sf} -> /kaggle/working/submission.parquet ✅")
         """
     )
     run_cell = code_cell(run_cell_source)
