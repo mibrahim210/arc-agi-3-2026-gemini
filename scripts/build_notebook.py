@@ -712,7 +712,8 @@ def build() -> dict:
         """\
         import os
 
-        if os.getenv('KAGGLE_IS_COMPETITION_RERUN'):
+        # Check if competition framework dataset exists
+        if os.path.exists('/kaggle/input/competitions/arc-prize-2026-arc-agi-3/ARC-AGI-3-Agents'):
             # Wait for the gateway sidecar to be ready.
             !curl --fail --retry 999 --retry-all-errors --retry-delay 5 \\
                   --retry-max-time 600 http://gateway:8001/api/games
@@ -753,7 +754,7 @@ def build() -> dict:
         ARC_BASE_URL=http://gateway:8001/
         OPERATION_MODE=online
         ENVIRONMENTS_DIR=
-                RECORDINGS_DIR=/kaggle/working/server_recording
+        RECORDINGS_DIR=/kaggle/working/server_recording
         DEWMA_MODEL_TAG=qwen2.5-coder:7b
         \"\"\")
 
@@ -775,10 +776,8 @@ def build() -> dict:
         dedent(
             """\
             import os
-            if not os.getenv('KAGGLE_IS_COMPETITION_RERUN'):
-                # Save-and-run-all (commit) mode: emit a dummy submission so the
-                # commit succeeds. The real submission.parquet is produced by the
-                # gateway during competition rerun.
+            if not os.path.exists('/kaggle/working/submission.parquet'):
+                # Save-and-run-all (commit) mode fallback: emit a dummy submission if real submission is missing.
                 import pandas as pd
                 submission = pd.DataFrame(
                     data=[['1_0', '1', True, 1]],
