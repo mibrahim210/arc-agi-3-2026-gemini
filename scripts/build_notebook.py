@@ -693,11 +693,6 @@ def build() -> dict:
             print(f"\\n❌ Ollama test failed: {error}")
 
             if log_handle:
-                log_handle.flush()
-
-            print_ollama_log()
-
-        finally:
             # Keep Ollama running after a successful test.
             # Only close this notebook's Python handle to the log file.
             if log_handle:
@@ -712,8 +707,7 @@ def build() -> dict:
         """\
         import os
 
-        # Check if competition framework dataset exists
-        if os.path.exists('/kaggle/input/competitions/arc-prize-2026-arc-agi-3/ARC-AGI-3-Agents'):
+        if os.getenv('KAGGLE_IS_COMPETITION_RERUN'):
             # Wait for the gateway sidecar to be ready.
             !curl --fail --retry 999 --retry-all-errors --retry-delay 5 \\
                   --retry-max-time 600 http://gateway:8001/api/games
@@ -783,8 +777,8 @@ def build() -> dict:
         dedent(
             """\
             import os
-            if not os.path.exists('/kaggle/working/submission.parquet'):
-                # Save-and-run-all (commit) mode fallback: emit a dummy submission if real submission is missing.
+            if not os.getenv('KAGGLE_IS_COMPETITION_RERUN') or not os.path.exists('/kaggle/working/submission.parquet'):
+                # Save-and-run-all (commit) mode: emit dummy submission so notebook commit succeeds.
                 import pandas as pd
                 submission = pd.DataFrame(
                     data=[['1_0', '1', True, 1]],
