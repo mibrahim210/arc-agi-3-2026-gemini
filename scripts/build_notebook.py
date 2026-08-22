@@ -691,14 +691,16 @@ def build() -> dict:
 
         except Exception as error:
             print(f"\\n❌ Ollama test failed: {error}")
-
             if log_handle:
+                log_handle.flush()
+            print_ollama_log()
+
+        finally:
             # Keep Ollama running after a successful test.
             # Only close this notebook's Python handle to the log file.
             if log_handle:
                 log_handle.flush()
                 log_handle.close()
-
         '''
     )
     ollama_setup_cell = code_cell(ollama_cell_source)
