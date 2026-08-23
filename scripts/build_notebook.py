@@ -775,7 +775,7 @@ def build() -> dict:
         dedent(
             """\
             import os
-            if not os.getenv('KAGGLE_IS_COMPETITION_RERUN') or not os.path.exists('/kaggle/working/submission.parquet'):
+            if not os.getenv('KAGGLE_IS_COMPETITION_RERUN'):
                 # Save-and-run-all (commit) mode: emit dummy submission so notebook commit succeeds.
                 import pandas as pd
                 submission = pd.DataFrame(
