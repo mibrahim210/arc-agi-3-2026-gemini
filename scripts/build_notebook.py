@@ -247,6 +247,17 @@ def build() -> dict:
         server_process = None
         log_handle = None
 
+        # Fast Health Check: If Ollama is already active and ready, skip heavyweight teardown & setup!
+        try:
+            import urllib.request
+            health_req = urllib.request.Request("http://127.0.0.1:11434/api/tags")
+            with urllib.request.urlopen(health_req, timeout=2) as h_resp:
+                if h_resp.status == 200:
+                    print("Ollama daemon is already active and ready ✅ Skipping setup in <0.5s!")
+                    sys.exit(0)
+        except Exception:
+            pass
+
         try:
             # -------------------------------------------------------------
             # 0. Stop processes left behind by previous Kaggle cells
