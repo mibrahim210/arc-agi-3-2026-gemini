@@ -396,9 +396,9 @@ def build() -> dict:
             os.environ["LD_LIBRARY_PATH"] = combined_library_path
             os.environ["OLLAMA_RUNNERS_DIR"] = ollama_library_root
             os.environ["OLLAMA_HOST"] = OLLAMA_HOST
-            os.environ["OLLAMA_NUM_PARALLEL"] = "1"
+            os.environ["OLLAMA_NUM_PARALLEL"] = "4"
             os.environ["OLLAMA_CONTEXT_LENGTH"] = "2048"
-            os.environ["OLLAMA_KEEP_ALIVE"] = "0"
+            os.environ["OLLAMA_KEEP_ALIVE"] = "24h"
 
             os.environ["PATH"] = (
                 os.path.join(destination_distribution, "bin")
@@ -618,7 +618,7 @@ def build() -> dict:
                     "and nothing else."
                 ),
                 "stream": False,
-                "keep_alive": 0,
+                "keep_alive": "24h",
                 "options": {
                     "temperature": 0.0,
                     "num_ctx": 2048,
