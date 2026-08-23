@@ -760,19 +760,6 @@ def build() -> dict:
                 DEWMA_MODEL_TAG=qwen2.5-coder:7b \
                 MPLBACKEND=agg \
                 python main.py --agent myagent
-
-            # Ensure submission.parquet is placed at root working directory
-            !if [ -f /kaggle/working/ARC-AGI-3-Agents/submission.parquet ]; then \\
-                cp /kaggle/working/ARC-AGI-3-Agents/submission.parquet /kaggle/working/submission.parquet; \\
-                echo "Copied submission.parquet to /kaggle/working/ ✅"; \\
-            fi
-
-            import glob, shutil
-            sub_files = glob.glob('/kaggle/working/**/submission.parquet', recursive=True)
-            for sf in sub_files:
-                if sf != '/kaggle/working/submission.parquet':
-                    shutil.copy(sf, '/kaggle/working/submission.parquet')
-                    print(f"Python fallback: copied {sf} -> /kaggle/working/submission.parquet ✅")
         """
     )
     run_cell = code_cell(run_cell_source)
