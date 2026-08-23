@@ -244,423 +244,515 @@ def build() -> dict:
             return unresolved
 
 
-        def setup_ollama():
-            server_process = None
-            log_handle = None
+        server_process = None
+        log_handle = None
 
-            # Fast Health Check: If Ollama is already active and ready, skip heavyweight teardown & setup!
-            try:
-                import urllib.request
-                health_req = urllib.request.Request("http://127.0.0.1:11434/api/tags")
-                with urllib.request.urlopen(health_req, timeout=2) as h_resp:
-                    if h_resp.status == 200:
-                        print("Ollama daemon is already active and ready ✅ Skipping setup in <0.5s!")
-                        return
-            except Exception:
+        try:
+            # -------------------------------------------------------------
+            # 0. Stop processes left behind by previous Kaggle cells
+            # -------------------------------------------------------------
+            subprocess.run(
+                ["pkill", "-x", "ollama"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+
+            subprocess.run(
+                ["pkill", "-x", "llama-server"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+
+            time.sleep(2)
+
+            # Remove stale log output from previous executions.
+            with open(OLLAMA_LOG, "w"):
                 pass
 
-            try:
-                # -------------------------------------------------------------
-                # 0. Stop processes left behind by previous Kaggle cells
-                # -------------------------------------------------------------
-                subprocess.run(
-                    ["pkill", "-x", "ollama"],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    check=False,
+            # -------------------------------------------------------------
+            # 1. Locate the complete offline Ollama distribution
+            # -------------------------------------------------------------
+            all_candidates = glob.glob("/kaggle/input/**/ollama", recursive=True)
+            offline_binaries = [
+                p for p in all_candidates
+                if os.path.isfile(p) and not p.endswith(".py") and not p.endswith(".sh") and not p.endswith(".gguf")
+            ]
+
+            if not offline_binaries:
+                print("=== Debug: Listing all files under /kaggle/input ===")
+                for root_dir, _, files in os.walk("/kaggle/input"):
+                    for file_name in files:
+                        print(os.path.join(root_dir, file_name))
+                raise FileNotFoundError(
+                    "Ollama binary was not found under /kaggle/input. "
+                    "Ensure dataset containing ollama binary is attached."
                 )
 
-                subprocess.run(
-                    ["pkill", "-x", "llama-server"],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    check=False,
-                )
+            source_binary = offline_binaries[0]
+            print(f"Found Ollama binary at: {source_binary}")
 
-                time.sleep(2)
+            if os.path.basename(os.path.dirname(source_binary)) == "bin":
+                source_distribution = os.path.dirname(os.path.dirname(source_binary))
+            else:
+                source_distribution = os.path.dirname(source_binary)
 
-                # Reset stale log file
-                if os.path.exists(OLLAMA_LOG_PATH):
+            destination_distribution = "/tmp/dist/linux-amd64"
+
+            print(f"Source distribution: {source_distribution}")
+
+            if os.path.exists(destination_distribution):
+                shutil.rmtree(destination_distribution)
+
+            shutil.copytree(
+                source_distribution,
+                destination_distribution,
+                symlinks=True,
+            )
+
+            # Locate copied binary and library root
+            copied_candidates = glob.glob(f"{destination_distribution}/**/ollama", recursive=True)
+            copied_files = [p for p in copied_candidates if os.path.isfile(p) and not p.endswith(".py") and not p.endswith(".sh") and not p.endswith(".gguf")]
+            ollama_binary = copied_files[0] if copied_files else os.path.join(destination_distribution, "ollama")
+
+            lib_candidates = glob.glob(f"{destination_distribution}/**/lib/ollama", recursive=True) + glob.glob(f"{destination_distribution}/**/runners", recursive=True)
+            ollama_library_root = lib_candidates[0] if lib_candidates else destination_distribution
+
+            print(f"Copied distribution to: {destination_distribution}")
+            print(f"Ollama binary: {ollama_binary}")
+            print(f"Ollama library root: {ollama_library_root}")
+
+            # -------------------------------------------------------------
+            # 2. Set file permissions
+            # -------------------------------------------------------------
+            os.chmod(ollama_binary, 0o755)
+
+            for root, directories, files in os.walk(ollama_library_root):
+                os.chmod(root, 0o755)
+
+                for directory in directories:
+                    directory_path = os.path.join(root, directory)
+                    os.chmod(directory_path, 0o755)
+
+                for filename in files:
+                    file_path = os.path.join(root, filename)
+
+                    # Do not replace a library symlink's target permissions.
+                    if os.path.islink(file_path):
+                        continue
+
                     try:
-                        os.remove(OLLAMA_LOG_PATH)
-                    except Exception:
+                        os.chmod(file_path, 0o755)
+                    except FileNotFoundError:
                         pass
 
-                print("=== DEWMA Full Ollama Distribution Test ===")
+            # -------------------------------------------------------------
+            # 3. Restore library links lost during Kaggle dataset upload
+            # -------------------------------------------------------------
+            print("\\nRestoring shared-library SONAME links...")
 
-                # -------------------------------------------------------------
-                # 1. Locate the Ollama bundle distribution directory
-                # -------------------------------------------------------------
-                found_distribution_roots = glob.glob(
-                    "/kaggle/input/**/ollama-linux-amd64",
-                    recursive=True,
-                )
+            restored_links = restore_shared_library_symlinks(
+                ollama_library_root
+            )
 
-                if not found_distribution_roots:
-                    raise FileNotFoundError(
-                        "No directory named 'ollama-linux-amd64' was found under /kaggle/input."
+            if restored_links:
+                print(f"Restored {len(restored_links)} library links:")
+
+                for restored_link in restored_links:
+                    print(
+                        f"  - {os.path.basename(restored_link['link'])}"
+                        f" -> {restored_link['target']}"
                     )
+            else:
+                print("No missing SONAME links were detected.")
 
-                source_distribution = found_distribution_roots[0]
-                print(f"Source distribution: {source_distribution}")
+            # -------------------------------------------------------------
+            # 4. Build LD_LIBRARY_PATH
+            # -------------------------------------------------------------
+            library_directories = find_library_directories(
+                ollama_library_root
+            )
 
-                destination_distribution = "/tmp/ollama_dist"
+            library_directories.insert(0, ollama_library_root)
+            library_directories = list(
+                dict.fromkeys(library_directories)
+            )
 
-                if os.path.exists(destination_distribution):
-                    shutil.rmtree(destination_distribution)
+            existing_ld_library_path = os.environ.get(
+                "LD_LIBRARY_PATH",
+                "",
+            )
 
-                print(
-                    f"Copying distribution to writable location: "
-                    f"{destination_distribution}..."
+            combined_library_path = os.pathsep.join(
+                library_directories
+            )
+
+            if existing_ld_library_path:
+                combined_library_path += (
+                    os.pathsep + existing_ld_library_path
                 )
 
-                shutil.copytree(
-                    source_distribution,
-                    destination_distribution,
-                    symlinks=True,
-                )
+            os.environ["LD_LIBRARY_PATH"] = combined_library_path
+            os.environ["OLLAMA_RUNNERS_DIR"] = ollama_library_root
+            os.environ["OLLAMA_HOST"] = OLLAMA_HOST
+            os.environ["OLLAMA_NUM_PARALLEL"] = "4"
+            os.environ["OLLAMA_CONTEXT_LENGTH"] = "2048"
+            os.environ["OLLAMA_KEEP_ALIVE"] = "24h"
 
-                ollama_binary = os.path.join(
-                    destination_distribution,
-                    "bin",
-                    "ollama",
-                )
+            os.environ["PATH"] = (
+                os.path.join(destination_distribution, "bin")
+                + os.pathsep
+                + os.environ.get("PATH", "")
+            )
 
-                if not os.path.exists(ollama_binary):
-                    raise FileNotFoundError(
-                        f"Ollama binary not found at expected path: {ollama_binary}"
-                    )
+            server_environment = os.environ.copy()
 
-                os.chmod(ollama_binary, 0o755)
+            print(
+                f"Library directories configured: "
+                f"{len(library_directories)}"
+            )
 
-                ollama_library_root = os.path.join(
-                    destination_distribution,
-                    "lib",
-                    "ollama",
-                )
+            for library_directory in library_directories:
+                print(f"  - {library_directory}")
 
-                if not os.path.exists(ollama_library_root):
-                    raise FileNotFoundError(
-                        f"Ollama library directory not found at: {ollama_library_root}"
-                    )
+            # -------------------------------------------------------------
+            # 5. Verify required libraries
+            # -------------------------------------------------------------
+            required_library_names = [
+                "libllama-common.so.0",
+                "libmtmd.so.0",
+                "libllama.so.0",
+                "libggml.so.0",
+                "libggml-base.so.0",
+            ]
 
-                # -------------------------------------------------------------
-                # 2. Fix directory and executable permissions recursively
-                # -------------------------------------------------------------
-                print("Setting 0755 permissions recursively on distribution...")
+            print("\\nChecking required Ollama libraries...")
 
-                os.chmod(destination_distribution, 0o755)
+            missing_required_libraries = []
 
-                for root, directories, files in os.walk(ollama_library_root):
-                    os.chmod(root, 0o755)
-
-                    for directory in directories:
-                        directory_path = os.path.join(root, directory)
-                        os.chmod(directory_path, 0o755)
-
-                    for filename in files:
-                        file_path = os.path.join(root, filename)
-
-                        # Do not replace a library symlink's target permissions.
-                        if os.path.islink(file_path):
-                            continue
-
-                        try:
-                            os.chmod(file_path, 0o755)
-                        except FileNotFoundError:
-                            pass
-
-                # -------------------------------------------------------------
-                # 3. Restore library links lost during Kaggle dataset upload
-                # -------------------------------------------------------------
-                print("\\nRestoring shared-library SONAME links...")
-
-                restored_links = restore_shared_library_symlinks(
-                    ollama_library_root
-                )
-
-                if restored_links:
-                    print(f"Restored {len(restored_links)} library links:")
-
-                    for restored_link in restored_links:
-                        print(
-                            f"  - {os.path.basename(restored_link['link'])}"
-                            f" -> {restored_link['target']}"
-                        )
-                else:
-                    print("No missing SONAME links were detected.")
-
-                # -------------------------------------------------------------
-                # 4. Build LD_LIBRARY_PATH
-                # -------------------------------------------------------------
-                library_directories = find_library_directories(
-                    ollama_library_root
-                )
-
-                library_directories.insert(0, ollama_library_root)
-                library_directories = list(
-                    dict.fromkeys(library_directories)
-                )
-
-                existing_ld_library_path = os.environ.get(
-                    "LD_LIBRARY_PATH",
-                    "",
-                )
-
-                combined_library_path = os.pathsep.join(
-                    library_directories
-                )
-
-                if existing_ld_library_path:
-                    combined_library_path += (
-                        os.pathsep + existing_ld_library_path
-                    )
-
-                os.environ["LD_LIBRARY_PATH"] = combined_library_path
-                os.environ["OLLAMA_RUNNERS_DIR"] = ollama_library_root
-                os.environ["OLLAMA_HOST"] = OLLAMA_HOST
-                os.environ["OLLAMA_NUM_PARALLEL"] = "4"
-                os.environ["OLLAMA_CONTEXT_LENGTH"] = "2048"
-                os.environ["OLLAMA_KEEP_ALIVE"] = "24h"
-
-                os.environ["PATH"] = (
-                    os.path.join(destination_distribution, "bin")
-                    + os.pathsep
-                    + os.environ.get("PATH", "")
-                )
-
-                server_environment = os.environ.copy()
-
-                print(
-                    f"Library directories configured: "
-                    f"{len(library_directories)}"
-                )
-
-                for library_directory in library_directories:
-                    print(f"  - {library_directory}")
-
-                # -------------------------------------------------------------
-                # 5. Verify required libraries
-                # -------------------------------------------------------------
-                required_library_names = [
-                    "libllama-common.so.0",
-                    "libmtmd.so.0",
-                    "libllama.so.0",
-                    "libggml.so.0",
-                    "libggml-base.so.0",
-                ]
-
-                print("\\nChecking required Ollama libraries...")
-
-                missing_required_libraries = []
-
-                for required_name in required_library_names:
-                    matches = glob.glob(
-                        os.path.join(
-                            ollama_library_root,
-                            "**",
-                            required_name,
-                        ),
-                        recursive=True,
-                    )
-
-                    if matches:
-                        print(f"  ✅ {required_name}: {matches[0]}")
-                    else:
-                        print(f"  ❌ {required_name}: missing")
-                        missing_required_libraries.append(required_name)
-
-                if missing_required_libraries:
-                    raise RuntimeError(
-                        f"Missing required shared libraries: {missing_required_libraries}"
-                    )
-
-                print("All required Ollama libraries verified ✅")
-
-                # -------------------------------------------------------------
-                # 6. Verify llama-server executable dependencies
-                # -------------------------------------------------------------
-                llama_server_candidates = glob.glob(
+            for required_name in required_library_names:
+                matches = glob.glob(
                     os.path.join(
                         ollama_library_root,
                         "**",
-                        "llama-server",
+                        required_name,
                     ),
                     recursive=True,
                 )
 
-                if not llama_server_candidates:
-                    raise FileNotFoundError(
-                        "No llama-server executable was found under lib/ollama."
+                if matches:
+                    print(f"  ✅ {required_name}: {matches[0]}")
+                else:
+                    print(f"  ❌ {required_name}: missing")
+                    missing_required_libraries.append(required_name)
+
+            if missing_required_libraries:
+                raise FileNotFoundError(
+                    "Required shared libraries are missing: "
+                    + ", ".join(missing_required_libraries)
+                )
+
+            # -------------------------------------------------------------
+            # 6. Locate llama-server
+            # -------------------------------------------------------------
+            llama_server_candidates = glob.glob(
+                os.path.join(
+                    ollama_library_root,
+                    "**",
+                    "llama-server",
+                ),
+                recursive=True,
+            )
+
+            if not llama_server_candidates:
+                raise FileNotFoundError(
+                    "No llama-server executable was found under lib/ollama."
+                )
+
+            llama_server_binary = llama_server_candidates[0]
+            os.chmod(llama_server_binary, 0o755)
+
+            print(f"\\nllama-server: {llama_server_binary}")
+
+            unresolved_dependencies = list_unresolved_dependencies(
+                llama_server_binary,
+                server_environment,
+            )
+
+            if unresolved_dependencies:
+                print("❌ Unresolved llama-server dependencies:")
+
+                for dependency in unresolved_dependencies:
+                    print(f"  {dependency}")
+
+                raise RuntimeError(
+                    "llama-server still has unresolved shared-library "
+                    "dependencies."
+                )
+
+            print("llama-server dependency check passed ✅")
+
+            # -------------------------------------------------------------
+            # 7. Locate the GGUF model
+            # -------------------------------------------------------------
+            gguf_candidates = glob.glob(
+                "/kaggle/input/**/*.gguf",
+                recursive=True,
+            )
+
+            if not gguf_candidates:
+                raise FileNotFoundError(
+                    "No GGUF model was found under /kaggle/input."
+                )
+
+            preferred_candidates = [
+                path
+                for path in gguf_candidates
+                if "qwen" in path.lower()
+                or "coder" in path.lower()
+                or "gemma4" in path.lower()
+                or "e4b" in path.lower()
+            ]
+
+            gguf_path = (
+                preferred_candidates[0]
+                if preferred_candidates
+                else gguf_candidates[0]
+            )
+
+            gguf_size_gib = os.path.getsize(gguf_path) / (1024 ** 3)
+
+            print(f"\\nSelected GGUF: {gguf_path}")
+            print(f"GGUF size: {gguf_size_gib:.2f} GiB")
+
+            # -------------------------------------------------------------
+            # 8. Start Ollama using the corrected environment
+            # -------------------------------------------------------------
+            print("\\nStarting Ollama server...")
+
+            log_handle = open(
+                OLLAMA_LOG,
+                "w",
+                encoding="utf-8",
+            )
+
+            server_process = subprocess.Popen(
+                [ollama_binary, "serve"],
+                stdout=log_handle,
+                stderr=subprocess.STDOUT,
+                env=server_environment,
+            )
+
+            if not wait_for_server(timeout_seconds=30):
+                if server_process.poll() is not None:
+                    print(
+                        f"Ollama process exited with code "
+                        f"{server_process.returncode}."
                     )
 
-                llama_server_binary = llama_server_candidates[0]
-                os.chmod(llama_server_binary, 0o755)
+                if log_handle:
+                    log_handle.flush()
 
-                print(f"\\nllama-server: {llama_server_binary}")
+                print_ollama_log()
 
-                unresolved_dependencies = list_unresolved_dependencies(
-                    llama_server_binary,
-                    server_environment,
+                raise RuntimeError(
+                    "Ollama did not become ready within 30 seconds."
                 )
 
-                if unresolved_dependencies:
-                    print("❌ Unresolved llama-server dependencies:")
+            print("Ollama daemon connected on port 11434 ✅")
 
-                    for dependency in unresolved_dependencies:
-                        print(f"  {dependency}")
+            # -------------------------------------------------------------
+            # 9. Create the local Ollama model
+            # -------------------------------------------------------------
+            with open(
+                MODELFILE_PATH,
+                "w",
+                encoding="utf-8",
+            ) as model_file:
+                model_file.write(f'FROM "{gguf_path}"\\n')
+                model_file.write("PARAMETER num_ctx 2048\\n")
+                model_file.write("PARAMETER temperature 0\\n")
 
-                    raise RuntimeError(
-                        "llama-server still has unresolved shared-library "
-                        "dependencies."
-                    )
+            print(f"\\nCreating model tag '{MODEL_TAG}'...")
 
-                print("llama-server dependency check passed ✅")
-
-                # -------------------------------------------------------------
-                # 7. Locate the GGUF model
-                # -------------------------------------------------------------
-                gguf_candidates = glob.glob(
-                    "/kaggle/input/**/*.gguf",
-                    recursive=True,
-                )
-
-                if not gguf_candidates:
-                    raise FileNotFoundError(
-                        "No GGUF model was found under /kaggle/input."
-                    )
-
-                preferred_candidates = [
-                    path
-                    for path in gguf_candidates
-                    if "qwen" in path.lower()
-                    or "coder" in path.lower()
-                    or "gemma4" in path.lower()
-                    or "e4b" in path.lower()
-                ]
-
-                gguf_path = (
-                    preferred_candidates[0]
-                    if preferred_candidates
-                    else gguf_candidates[0]
-                )
-
-                print(f"\\nModel GGUF path: {gguf_path}")
-
-                # -------------------------------------------------------------
-                # 8. Start Ollama server process
-                # -------------------------------------------------------------
-                print("\\nStarting Ollama daemon background process...")
-
-                log_handle = open(
-                    OLLAMA_LOG_PATH,
-                    "w",
-                    encoding="utf-8",
-                )
-
-                server_process = subprocess.Popen(
-                    [ollama_binary, "serve"],
-                    stdout=log_handle,
-                    stderr=subprocess.STDOUT,
-                    env=server_environment,
-                )
-
-                if not wait_for_server(timeout_seconds=30):
-                    if server_process.poll() is not None:
-                        print(
-                            f"Ollama process exited with code "
-                            f"{server_process.returncode}."
-                        )
-
-                    if log_handle:
-                        log_handle.flush()
-
-                    print_ollama_log()
-
-                    raise RuntimeError(
-                        "Ollama did not become ready within 30 seconds."
-                    )
-
-                print("Ollama daemon connected on port 11434 ✅")
-
-                # -------------------------------------------------------------
-                # 9. Create the local Ollama model
-                # -------------------------------------------------------------
-                with open(
+            create_result = subprocess.run(
+                [
+                    ollama_binary,
+                    "create",
+                    MODEL_TAG,
+                    "-f",
                     MODELFILE_PATH,
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                env=server_environment,
+                check=False,
+            )
+
+            print(create_result.stdout)
+
+            if create_result.returncode != 0:
+                if log_handle:
+                    log_handle.flush()
+
+                print_ollama_log()
+
+                raise RuntimeError(
+                    f"ollama create failed with exit code "
+                    f"{create_result.returncode}."
+                )
+
+            print(f"Ollama model '{MODEL_TAG}' registered ✅")
+
+            # -------------------------------------------------------------
+            # 10. Test real model loading and generation
+            # -------------------------------------------------------------
+            print("\\nLoading model and testing generation...")
+
+            request_body = {
+                "model": MODEL_TAG,
+                "prompt": (
+                    "Reply with exactly the single word CONNECTED "
+                    "and nothing else."
+                ),
+                "stream": False,
+                "keep_alive": "24h",
+                "options": {
+                    "temperature": 0.0,
+                    "num_ctx": 2048,
+                    "num_predict": 10,
+                },
+            }
+
+            request = urllib.request.Request(
+                f"http://{OLLAMA_HOST}/api/generate",
+                data=json.dumps(request_body).encode("utf-8"),
+                headers={
+                    "Content-Type": "application/json",
+                },
+                method="POST",
+            )
+
+            # Initial CPU model loading may take several minutes.
+            with urllib.request.urlopen(
+                request,
+                timeout=300,
+            ) as response:
+                result = json.loads(
+                    response.read().decode("utf-8")
+                )
+
+            generated_text = result.get("response", "").strip()
+
+            print(f"✅ LLM response: {generated_text}")
+            print(f"Load duration: {result.get('load_duration')}")
+            print(f"Prompt tokens: {result.get('prompt_eval_count')}")
+            print(f"Generated tokens: {result.get('eval_count')}")
+            print("\\n=== FULL OLLAMA TEST PASSED ===")
+
+        except urllib.error.HTTPError as error:
+            print(f"\\n❌ HTTP Error {error.code}: {error.reason}")
+
+            try:
+                error_body = error.read().decode(
+                    "utf-8",
+                    errors="replace",
+                )
+                print(f"API error body: {error_body}")
+            except Exception:
+                pass
+
+            if log_handle:
+                log_handle.flush()
+
+            print_ollama_log()
+
+        except urllib.error.URLError as error:
+            print(f"\\n❌ Connection error: {error}")
+
+            if log_handle:
+                log_handle.flush()
+
+            print_ollama_log()
+
+        except FileNotFoundError as error:
+            print(f"\\n❌ Required file or command missing: {error}")
+
+            if log_handle:
+                log_handle.flush()
+
+            print_ollama_log()
+
+        except Exception as error:
+            print(f"\\n❌ Ollama test failed: {error}")
+            if log_handle:
+                log_handle.flush()
+            print_ollama_log()
+
+        finally:
+            # Keep Ollama running after a successful test.
+            # Only close this notebook's Python handle to the log file.
             if log_handle:
                 log_handle.flush()
                 log_handle.close()
-
-        setup_ollama()
         '''
     )
     ollama_setup_cell = code_cell(ollama_cell_source)
 
-    run_cell_source = dedent(
-        """\
-        import os
-
-        if os.getenv('KAGGLE_IS_COMPETITION_RERUN'):
-            # Wait for the gateway sidecar to be ready.
-            !curl --fail --retry 999 --retry-all-errors --retry-delay 5 \\
-                  --retry-max-time 600 http://gateway:8001/api/games
-
-            # Copy the framework into a writable location.
-            !cp -r /kaggle/input/competitions/arc-prize-2026-arc-agi-3/ARC-AGI-3-Agents \\
-                   /kaggle/working/ARC-AGI-3-Agents
-
-            # Drop our agent in as a framework template.
-            !cp /kaggle/working/my_agent.py \
-                /kaggle/working/ARC-AGI-3-Agents/agents/templates/my_agent.py
-
-            # Register MyAgent in the framework's agent registry. We rewrite
-            # __init__.py because the upstream version eagerly imports
-            # templates with deps we don't ship (langgraph, smolagents, etc.).
-            with open('/kaggle/working/ARC-AGI-3-Agents/agents/__init__.py', 'w') as f:
-                f.write(\"\"\"from typing import Type
-        from dotenv import load_dotenv
-        from .agent import Agent, Playback
-        from .swarm import Swarm
-        from .templates.random_agent import Random
-        from .templates.my_agent import MyAgent
-
-        load_dotenv()
-
-        AVAILABLE_AGENTS: dict[str, Type[Agent]] = {
-            'random': Random,
-            'myagent': MyAgent,
-        }
-        \"\"\")
-
-            # Point the framework at the gateway sidecar.
-            with open('/kaggle/working/ARC-AGI-3-Agents/.env', 'w') as f:
-                f.write(\"\"\"SCHEME=http
-HOST=gateway
-PORT=8001
-ARC_API_KEY=test-key-123
-ARC_BASE_URL=http://gateway:8001/
-OPERATION_MODE=online
-ENVIRONMENTS_DIR=
-RECORDINGS_DIR=/kaggle/working/server_recording
-DEWMA_EXPECTED_GAMES=110
-DEWMA_EFFECTIVE_GAME_PARALLELISM=110
-DEWMA_MODEL_TAG=qwen2.5-coder:7b
-\"\"\")
-
-            # Run it. The gateway records every action and emits submission.parquet.
-            !cd /kaggle/working/ARC-AGI-3-Agents && \
-                HOST=gateway \
-                PORT=8001 \
-                SCHEME=http \
-                ARC_BASE_URL=http://gateway:8001/ \
-                DEWMA_MAX_ACTIONS=400 \
-                DEWMA_EXPECTED_GAMES=110 \
-                DEWMA_EFFECTIVE_GAME_PARALLELISM=110 \
-                DEWMA_MODEL_TAG=qwen2.5-coder:7b \
-                MPLBACKEND=agg \
-                python main.py --agent myagent
-        """
+    run_cell_source = (
+        "import os\n\n"
+        "if os.getenv('KAGGLE_IS_COMPETITION_RERUN'):\n"
+        "    # Wait for the gateway sidecar to be ready.\n"
+        "    !curl --fail --retry 999 --retry-all-errors --retry-delay 5 \\\n"
+        "          --retry-max-time 600 http://gateway:8001/api/games\n\n"
+        "    # Copy the framework into a writable location.\n"
+        "    !cp -r /kaggle/input/competitions/arc-prize-2026-arc-agi-3/ARC-AGI-3-Agents \\\n"
+        "           /kaggle/working/ARC-AGI-3-Agents\n\n"
+        "    # Drop our agent in as a framework template.\n"
+        "    !cp /kaggle/working/my_agent.py \\\n"
+        "        /kaggle/working/ARC-AGI-3-Agents/agents/templates/my_agent.py\n\n"
+        "    # Register MyAgent in the framework's agent registry.\n"
+        "    with open('/kaggle/working/ARC-AGI-3-Agents/agents/__init__.py', 'w') as f:\n"
+        "        f.write('''from typing import Type\n"
+        "from dotenv import load_dotenv\n"
+        "from .agent import Agent, Playback\n"
+        "from .swarm import Swarm\n"
+        "from .templates.random_agent import Random\n"
+        "from .templates.my_agent import MyAgent\n\n"
+        "load_dotenv()\n\n"
+        "AVAILABLE_AGENTS: dict[str, Type[Agent]] = {\n"
+        "    'random': Random,\n"
+        "    'myagent': MyAgent,\n"
+        "}\n"
+        "''')\n\n"
+        "    # Point the framework at the gateway sidecar.\n"
+        "    with open('/kaggle/working/ARC-AGI-3-Agents/.env', 'w') as f:\n"
+        "        f.write('''SCHEME=http\n"
+        "HOST=gateway\n"
+        "PORT=8001\n"
+        "ARC_API_KEY=test-key-123\n"
+        "ARC_BASE_URL=http://gateway:8001/\n"
+        "OPERATION_MODE=online\n"
+        "ENVIRONMENTS_DIR=\n"
+        "RECORDINGS_DIR=/kaggle/working/server_recording\n"
+        "DEWMA_EXPECTED_GAMES=110\n"
+        "DEWMA_EFFECTIVE_GAME_PARALLELISM=110\n"
+        "DEWMA_MODEL_TAG=qwen2.5-coder:7b\n"
+        "''')\n\n"
+        "    # Run it. The gateway records every action and emits submission.parquet.\n"
+        "    !cd /kaggle/working/ARC-AGI-3-Agents && \\\n"
+        "        HOST=gateway \\\n"
+        "        PORT=8001 \\\n"
+        "        SCHEME=http \\\n"
+        "        ARC_BASE_URL=http://gateway:8001/ \\\n"
+        "        DEWMA_MAX_ACTIONS=400 \\\n"
+        "        DEWMA_EXPECTED_GAMES=110 \\\n"
+        "        DEWMA_EFFECTIVE_GAME_PARALLELISM=110 \\\n"
+        "        DEWMA_MODEL_TAG=qwen2.5-coder:7b \\\n"
+        "        MPLBACKEND=agg \\\n"
+        "        python main.py --agent myagent\n"
     )
     run_cell = code_cell(run_cell_source)
 
