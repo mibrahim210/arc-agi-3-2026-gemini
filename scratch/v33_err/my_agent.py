@@ -260,7 +260,7 @@ class Config:
     trace_dir: str = os.getenv("DEWMA_TRACE_DIR", "./traces")
     trace_max_records: int = _env_int("DEWMA_TRACE_MAX_RECORDS", 2048)
     session_limit_sec: int = _env_int(
-        "DEWMA_SESSION_LIMIT_SEC", int(8.75 * 3600))
+        "DEWMA_SESSION_LIMIT_SEC", int(8.0 * 3600))
     finalization_reserve_sec: int = _env_int(
         "DEWMA_FINALIZATION_RESERVE_SEC", 300)
     runtime_a7_ratio: float = _env_float("DEWMA_RUNTIME_A7_RATIO", 0.35)
@@ -3831,7 +3831,7 @@ class OptionalLocalReasoner:
             return None
 
         # Thread-safe non-blocking mutex lock for Ollama concurrency protection.
-        # If another game thread is querying Ollama, do not block or crash—
+        # If another game thread is querying Ollama, do not block or crashâ€”
         # non-blocking acquire allows fast fallback to deterministic Candidate Generator!
         acquired = _OLLAMA_LOCK.acquire(blocking=False)
         if not acquired:
