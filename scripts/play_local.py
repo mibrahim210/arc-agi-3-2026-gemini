@@ -15,6 +15,7 @@ import argparse
 import importlib.util
 import logging
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -44,6 +45,31 @@ def load_my_agent_class():
     return module.MyAgent
 
 
+def play_one_game(MyAgentCls, arc, game_id: str, render_mode: str | None):
+    env = arc.make(game_id, render_mode=render_mode)
+    if env is None:
+        return (game_id, "ENV_CREATE_FAILED", 0, 0)
+
+    agent = MyAgentCls(
+        card_id="local-dev",
+        game_id=game_id,
+        agent_name=f"MyAgent.local.{game_id}",
+        ROOT_URL="http://localhost",
+        record=False,
+        arc_env=env,
+        tags=["local-dev"],
+    )
+    agent.main()
+
+    final = agent.frames[-1]
+    return (
+        game_id,
+        final.state,
+        final.levels_completed,
+        agent.action_counter,
+    )
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--game", default=None,
@@ -56,6 +82,9 @@ def main() -> None:
                    help="List available games and exit.")
     p.add_argument("--render", default=None, choices=[None, "terminal"],
                    help="Optional terminal rendering each step.")
+    p.add_argument("--parallel", type=int, default=1,
+                   help="Number of games to run concurrently. Use >1 to better "
+                        "approximate Kaggle swarm behavior.")
     args = p.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -91,29 +120,27 @@ def main() -> None:
         MyAgentCls.MAX_ACTIONS = args.max_steps
 
     per_game = []
-    for i, game_id in enumerate(game_ids, 1):
-        print(f"=== [{i}/{len(game_ids)}] {game_id} ===")
-        env = arc.make(game_id, render_mode=args.render)
-        if env is None:
-            print(f"  could not create env for {game_id!r}, skipping")
-            continue
-
-        agent = MyAgentCls(
-            card_id="local-dev",
-            game_id=game_id,
-            agent_name=f"MyAgent.local.{game_id}",
-            ROOT_URL="http://localhost",
-            record=False,
-            arc_env=env,
-            tags=["local-dev"],
-        )
-        agent.main()
-
-        final = agent.frames[-1]
-        per_game.append((game_id, final.state, final.levels_completed,
-                         agent.action_counter))
-        print(f"  -> state={final.state}, levels_completed={final.levels_completed}, "
-              f"actions={agent.action_counter}")
+    if args.parallel <= 1:
+        for i, game_id in enumerate(game_ids, 1):
+            print(f"=== [{i}/{len(game_ids)}] {game_id} ===")
+            result = play_one_game(MyAgentCls, arc, game_id, args.render)
+            per_game.append(result)
+            _, state, levels, actions = result
+            print(f"  -> state={state}, levels_completed={levels}, actions={actions}")
+    else:
+        print(f"Running {len(game_ids)} games with parallelism={args.parallel}\n")
+        with ThreadPoolExecutor(max_workers=args.parallel) as executor:
+            future_to_index = {
+                executor.submit(play_one_game, MyAgentCls, arc, game_id, args.render): (i, game_id)
+                for i, game_id in enumerate(game_ids, 1)
+            }
+            for future in as_completed(future_to_index):
+                i, game_id = future_to_index[future]
+                print(f"=== [{i}/{len(game_ids)}] {game_id} ===")
+                result = future.result()
+                per_game.append(result)
+                _, state, levels, actions = result
+                print(f"  -> state={state}, levels_completed={levels}, actions={actions}")
 
     sc = arc.get_scorecard()
     print("\n========= SUMMARY =========")
