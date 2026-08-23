@@ -254,7 +254,7 @@ def build() -> dict:
             with urllib.request.urlopen(health_req, timeout=2) as h_resp:
                 if h_resp.status == 200:
                     print("Ollama daemon is already active and ready ✅ Skipping setup in <0.5s!")
-                    sys.exit(0)
+                    return
         except Exception:
             pass
 
@@ -620,48 +620,51 @@ def build() -> dict:
             # -------------------------------------------------------------
             # 10. Test real model loading and generation
             # -------------------------------------------------------------
-            print("\\nLoading model and testing generation...")
+            if os.getenv("KAGGLE_IS_COMPETITION_RERUN"):
+                print("\\n[Competition Rerun Mode] Skipping test generation to boot gameplay instantly! ✅")
+            else:
+                print("\\nLoading model and testing generation...")
 
-            request_body = {
-                "model": MODEL_TAG,
-                "prompt": (
-                    "Reply with exactly the single word CONNECTED "
-                    "and nothing else."
-                ),
-                "stream": False,
-                "keep_alive": "24h",
-                "options": {
-                    "temperature": 0.0,
-                    "num_ctx": 2048,
-                    "num_predict": 10,
-                },
-            }
+                request_body = {
+                    "model": MODEL_TAG,
+                    "prompt": (
+                        "Reply with exactly the single word CONNECTED "
+                        "and nothing else."
+                    ),
+                    "stream": False,
+                    "keep_alive": "24h",
+                    "options": {
+                        "temperature": 0.0,
+                        "num_ctx": 2048,
+                        "num_predict": 10,
+                    },
+                }
 
-            request = urllib.request.Request(
-                f"http://{OLLAMA_HOST}/api/generate",
-                data=json.dumps(request_body).encode("utf-8"),
-                headers={
-                    "Content-Type": "application/json",
-                },
-                method="POST",
-            )
-
-            # Initial CPU model loading may take several minutes.
-            with urllib.request.urlopen(
-                request,
-                timeout=300,
-            ) as response:
-                result = json.loads(
-                    response.read().decode("utf-8")
+                request = urllib.request.Request(
+                    f"http://{OLLAMA_HOST}/api/generate",
+                    data=json.dumps(request_body).encode("utf-8"),
+                    headers={
+                        "Content-Type": "application/json",
+                    },
+                    method="POST",
                 )
 
-            generated_text = result.get("response", "").strip()
+                # Initial CPU model loading may take several minutes.
+                with urllib.request.urlopen(
+                    request,
+                    timeout=300,
+                ) as response:
+                    result = json.loads(
+                        response.read().decode("utf-8")
+                    )
 
-            print(f"✅ LLM response: {generated_text}")
-            print(f"Load duration: {result.get('load_duration')}")
-            print(f"Prompt tokens: {result.get('prompt_eval_count')}")
-            print(f"Generated tokens: {result.get('eval_count')}")
-            print("\\n=== FULL OLLAMA TEST PASSED ===")
+                generated_text = result.get("response", "").strip()
+
+                print(f"✅ LLM response: {generated_text}")
+                print(f"Load duration: {result.get('load_duration')}")
+                print(f"Prompt tokens: {result.get('prompt_eval_count')}")
+                print(f"Generated tokens: {result.get('eval_count')}")
+                print("\\n=== FULL OLLAMA TEST PASSED ===")
 
         except urllib.error.HTTPError as error:
             print(f"\\n❌ HTTP Error {error.code}: {error.reason}")
