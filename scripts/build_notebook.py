@@ -740,15 +740,17 @@ def build() -> dict:
             # Point the framework at the gateway sidecar.
             with open('/kaggle/working/ARC-AGI-3-Agents/.env', 'w') as f:
                 f.write(\"\"\"SCHEME=http
-        HOST=gateway
-        PORT=8001
-        ARC_API_KEY=test-key-123
-        ARC_BASE_URL=http://gateway:8001/
-        OPERATION_MODE=online
-        ENVIRONMENTS_DIR=
-                RECORDINGS_DIR=/kaggle/working/server_recording
-        DEWMA_MODEL_TAG=qwen2.5-coder:7b
-        \"\"\")
+HOST=gateway
+PORT=8001
+ARC_API_KEY=test-key-123
+ARC_BASE_URL=http://gateway:8001/
+OPERATION_MODE=online
+ENVIRONMENTS_DIR=
+RECORDINGS_DIR=/kaggle/working/server_recording
+DEWMA_EXPECTED_GAMES=110
+DEWMA_EFFECTIVE_GAME_PARALLELISM=110
+DEWMA_MODEL_TAG=qwen2.5-coder:7b
+\"\"\")
 
             # Run it. The gateway records every action and emits submission.parquet.
             !cd /kaggle/working/ARC-AGI-3-Agents && \
@@ -757,6 +759,8 @@ def build() -> dict:
                 SCHEME=http \
                 ARC_BASE_URL=http://gateway:8001/ \
                 DEWMA_MAX_ACTIONS=400 \
+                DEWMA_EXPECTED_GAMES=110 \
+                DEWMA_EFFECTIVE_GAME_PARALLELISM=110 \
                 DEWMA_MODEL_TAG=qwen2.5-coder:7b \
                 MPLBACKEND=agg \
                 python main.py --agent myagent
