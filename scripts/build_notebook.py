@@ -746,13 +746,19 @@ def build() -> dict:
         ARC_BASE_URL=http://gateway:8001/
         OPERATION_MODE=online
         ENVIRONMENTS_DIR=
-        RECORDINGS_DIR=/kaggle/working/server_recording
+                RECORDINGS_DIR=/kaggle/working/server_recording
         DEWMA_MODEL_TAG=qwen2.5-coder:7b
         \"\"\")
 
             # Run it. The gateway records every action and emits submission.parquet.
-            !cd /kaggle/working/ARC-AGI-3-Agents && \\
-                MPLBACKEND=agg \\
+            !cd /kaggle/working/ARC-AGI-3-Agents && \
+                HOST=gateway \
+                PORT=8001 \
+                SCHEME=http \
+                ARC_BASE_URL=http://gateway:8001/ \
+                DEWMA_MAX_ACTIONS=400 \
+                DEWMA_MODEL_TAG=qwen2.5-coder:7b \
+                MPLBACKEND=agg \
                 python main.py --agent myagent
 
             # Ensure submission.parquet is placed at root working directory
