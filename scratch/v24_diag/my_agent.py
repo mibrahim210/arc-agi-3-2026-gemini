@@ -3723,9 +3723,6 @@ class PathPlanner:
 # ---------------------------------------------------------------------------
 
 
-_OLLAMA_LOCK = threading.Lock()
-
-
 class OptionalLocalReasoner:
     """Lazy, milestone-gated local causal-LM adapter with safe grid tools."""
 
@@ -3829,19 +3826,11 @@ class OptionalLocalReasoner:
     def _generate_json(self, prompt: str, step: int) -> dict[str, Any] | None:
         if not self.available:
             return None
-
-        # Thread-safe non-blocking mutex lock for Ollama concurrency protection.
-        # If another game thread is querying Ollama, do not block or crash—
-        # non-blocking acquire allows fast fallback to deterministic Candidate Generator!
-        acquired = _OLLAMA_LOCK.acquire(blocking=False)
-        if not acquired:
-            return None
-
+        self.calls += 1
+        self.calls_this_level += 1
+        self.last_call_step = step
         started = time.monotonic()
         try:
-            self.calls += 1
-            self.calls_this_level += 1
-            self.last_call_step = step
             if self._model == "ollama":
                 import urllib.request
                 import json
@@ -3859,7 +3848,7 @@ class OptionalLocalReasoner:
                     headers={'Content-Type': 'application/json'},
                     method="POST"
                 )
-                with urllib.request.urlopen(req, timeout=30) as resp:
+                with urllib.request.urlopen(req, timeout=60) as resp:
                     result = json.loads(resp.read().decode('utf-8'))
                     text = result.get("response", "").strip()
                 print(f"[Ollama LLM Call #{self.calls}] Tag: {getattr(self, 'detected_tag', 'unknown')} | Latency: {time.monotonic()-started:.2f}s | Output: {text[:80]}...", file=sys.stderr)
@@ -3875,10 +3864,10 @@ class OptionalLocalReasoner:
                 text = res["choices"][0]["text"].strip()
                 return self._extract_json(text)
         except Exception as exc:
-            print(f"[LLM Reasoner Transient Error] {exc}", file=sys.stderr)
+            print(f"[LLM Reasoner Error] {exc}", file=sys.stderr)
+            self._failed = True
             return None
         finally:
-            _OLLAMA_LOCK.release()
             self.last_latency_sec = max(0.0, time.monotonic() - started)
             self.total_latency_sec += self.last_latency_sec
 
