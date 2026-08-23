@@ -244,19 +244,20 @@ def build() -> dict:
             return unresolved
 
 
-        server_process = None
-        log_handle = None
+        def setup_ollama():
+            server_process = None
+            log_handle = None
 
-        # Fast Health Check: If Ollama is already active and ready, skip heavyweight teardown & setup!
-        try:
-            import urllib.request
-            health_req = urllib.request.Request("http://127.0.0.1:11434/api/tags")
-            with urllib.request.urlopen(health_req, timeout=2) as h_resp:
-                if h_resp.status == 200:
-                    print("Ollama daemon is already active and ready ✅ Skipping setup in <0.5s!")
-                    return
-        except Exception:
-            pass
+            # Fast Health Check: If Ollama is already active and ready, skip heavyweight teardown & setup!
+            try:
+                import urllib.request
+                health_req = urllib.request.Request("http://127.0.0.1:11434/api/tags")
+                with urllib.request.urlopen(health_req, timeout=2) as h_resp:
+                    if h_resp.status == 200:
+                        print("Ollama daemon is already active and ready ✅ Skipping setup in <0.5s!")
+                        return
+            except Exception:
+                pass
 
         try:
             # -------------------------------------------------------------
@@ -711,6 +712,8 @@ def build() -> dict:
             if log_handle:
                 log_handle.flush()
                 log_handle.close()
+
+        setup_ollama()
         '''
     )
     ollama_setup_cell = code_cell(ollama_cell_source)
