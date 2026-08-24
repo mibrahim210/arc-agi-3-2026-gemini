@@ -3853,7 +3853,7 @@ class OptionalLocalReasoner:
                         "stream": False,
                         "keep_alive": "24h",
                         "options": {
-                            "temperature": 0.0,
+                            "temperature": 0.4,
                             "num_predict": self.config.model_max_new_tokens
                         }
                     }).encode('utf-8'),
@@ -3892,7 +3892,7 @@ class OptionalLocalReasoner:
         goals_summary: Sequence[Mapping[str, Any]] = (),
         programs_summary: Sequence[Mapping[str, Any]] = (),
         response_frames: Sequence[np.ndarray] = (),
-    ) -> ReasonerProposal | None:
+    ) -> list[ReasonerProposal] | None:
         if not self.can_call(step, milestone=True) or not self._load():
             return None
 
@@ -3916,14 +3916,13 @@ class OptionalLocalReasoner:
         prompt = (
             "You control an unknown ARC-AGI-3 environment. You may inspect the "
             "current integer grid or execute Python scripts without spending an action, then return "
-            "one legal action. Emit ONE JSON object only per response.\n"
+            "up to 5 distinct legal actions or hypotheses. Emit ONE JSON object only per response.\n"
             "Inspection schema: "
             '{"type":"inspect","expression":"state.find_color(3)"}\n'
             "Python execution schema: "
             '{"type":"python","code":"for t in recent_transitions: print(t[\'action\'])"}\n'
-            "Final schema: "
-            '{"type":"action","action":"ACTION1","x":null,"y":null,'
-            '"confidence":0.0,"why":"..."}\n'
+            "Final schema (generate up to 5 diverse proposals!): "
+            '{"type":"action","proposals":[{"action":"ACTION1","x":null,"y":null,"confidence":0.9,"why":"..."}, {"action":"...","why":"..."}]}\n'
             "Allowed state methods: summary(), shape(), find_color(value), count(value), "
             "patch(x,y,radius), diff_last_frame(), changed_cells(), color_histogram(). "
             "Prefer stored evidence and reversible progress. Do not request a physical "
@@ -3935,7 +3934,7 @@ class OptionalLocalReasoner:
             f"recent_transitions={json.dumps(recent, separators=(',', ':'))}\n"
             f"candidate_goals={json.dumps(list(goals_summary), separators=(',', ':'), default=str)}\n"
             f"verified_programs={json.dumps(list(programs_summary), separators=(',', ':'), default=str)}\n"
-            "Optional program schema: \"program\":{\"kind\":\"translation|color_map|component_delete|component_recolor\",\"action\":\"ACTION1\",\"params\":{...}}. "
+            "Optional program schema (add inside proposal): \"program\":{\"kind\":\"translation|color_map|component_delete|component_recolor\",\"action\":\"ACTION1\",\"params\":{...}}. "
             "A program is only a hypothesis and will be replay-verified before use.\n"
         )
 
@@ -3997,31 +3996,42 @@ class OptionalLocalReasoner:
                         f"{str(exc)[:180]}\nReturn final action JSON now.\n"
                     )
                 continue
-
-            name = str(obj.get("action", "")).upper()
-            if name not in legal_names:
-                return None
-            data: tuple[tuple[str, int], ...] = ()
-            if obj.get("x") is not None or obj.get("y") is not None:
-                if obj.get("x") is None or obj.get("y") is None:
-                    return None
-                x, y = int(obj["x"]), int(obj["y"])
-                if not (0 <= x < scene.width and 0 <= y < scene.height):
-                    return None
-                data = (("x", x), ("y", y))
-            confidence = float(obj.get("confidence", 0.5))
-            action_spec = ActionSpec(
-                name=name,
-                data=data,
-                source="milestone_model_repl",
-                predicted_effect=str(obj.get("why", "model proposal"))[:160],
-                score=2.0 + max(0.0, min(1.0, confidence)),
-                goal_ids=tuple(str(x) for x in obj.get("goal_ids", [])[
-                               :4]) if isinstance(obj.get("goal_ids"), list) else (),
-            )
-            program_spec = obj.get("program") if isinstance(
-                obj.get("program"), dict) else None
-            return ReasonerProposal(action_spec, program_spec)
+            proposals_data = obj.get("proposals")
+            if not isinstance(proposals_data, list):
+                proposals_data = [obj]
+            
+            results: list[ReasonerProposal] = []
+            for prop in proposals_data:
+                if not isinstance(prop, dict):
+                    continue
+                name = str(prop.get("action", "")).upper()
+                if name not in legal_names:
+                    continue
+                data: tuple[tuple[str, int], ...] = ()
+                if prop.get("x") is not None or prop.get("y") is not None:
+                    if prop.get("x") is None or prop.get("y") is None:
+                        continue
+                    x, y = int(prop["x"]), int(prop["y"])
+                    if not (0 <= x < scene.width and 0 <= y < scene.height):
+                        continue
+                    data = (("x", x), ("y", y))
+                confidence = float(prop.get("confidence", 0.5))
+                action_spec = ActionSpec(
+                    name=name,
+                    data=data,
+                    source="milestone_model_repl",
+                    predicted_effect=str(prop.get("why", "model proposal"))[:160],
+                    score=2.0 + max(0.0, min(1.0, confidence)),
+                    goal_ids=tuple(str(x) for x in prop.get("goal_ids", [])[
+                                   :4]) if isinstance(prop.get("goal_ids"), list) else (),
+                )
+                program_spec = prop.get("program") if isinstance(
+                    prop.get("program"), dict) else None
+                results.append(ReasonerProposal(action_spec, program_spec))
+            
+            if results:
+                return results
+            return None
         return None
 
 # ---------------------------------------------------------------------------
@@ -4834,44 +4844,58 @@ class MetacognitiveController:
         milestone, milestone_name = self._milestone(scene, step)
         is_stagnant_now = is_looping or self.memory.no_op_streak >= 3
         if profile.use_model and self.reasoner.can_call(step, milestone, is_stagnant=is_stagnant_now):
-            proposal = self.reasoner.propose(
+            proposals = self.reasoner.propose(
                 scene, sorted(legal_names), self.memory, step,
                 goals_summary=self.goals.summary() if profile.use_goals else (),
                 programs_summary=self.programs.summary() if profile.use_programs else (),
                 response_frames=response_frames,
             )
-            if proposal is not None:
-                if proposal.program_spec is not None and profile.use_programs:
-                    self.programs.ingest_model_program(
-                        proposal.program_spec, list(self.memory.transitions))
-                model_action = proposal.action
-                if model_action is not None:
-                    signature = _action_signature(scene, model_action)
-                    is_probe = self.memory.tried_count(
-                        scene.exact_key, model_action) == 0
-                    prediction = self._predict(scene, model_action, profile)
-                    decision = self._verify(
-                        scene, model_action, legal_names, prediction, is_probe, profile)
-                    if (
-                        not self.dead.is_dead(signature)
-                        and decision.allowed
-                        and (not is_probe or self.memory.probes_this_level < self.config.max_physical_probes_per_level)
-                    ):
-                        self.last_model_milestone = milestone_name
-                        spec = ActionSpec(
-                            name=model_action.name, data=model_action.data, source=model_action.source,
-                            predicted_effect=model_action.predicted_effect if prediction is None else prediction.expected_effect,
-                            score=model_action.score + decision.score,
-                            program_id=None if prediction is None else prediction.program_id,
-                            predicted_state_key=None if prediction is None else _stable_hash_bytes(
-                                prediction.grid.tobytes()),
-                            goal_ids=decision.goal_ids,
-                        )
-                        return spec, is_probe, {
-                            "stage": "milestone_model_goal_verified" if profile.use_alignment else "milestone_model_verified",
-                            "milestone": milestone_name,
-                            "alignment": round(decision.score, 3),
-                        }
+            if proposals is not None:
+                best_spec = None
+                best_is_probe = False
+                best_meta = None
+                best_score = -999.0
+                
+                for proposal in proposals:
+                    if proposal.program_spec is not None and profile.use_programs:
+                        self.programs.ingest_model_program(
+                            proposal.program_spec, list(self.memory.transitions))
+                    
+                    model_action = proposal.action
+                    if model_action is not None:
+                        signature = _action_signature(scene, model_action)
+                        is_probe = self.memory.tried_count(
+                            scene.exact_key, model_action) == 0
+                        prediction = self._predict(scene, model_action, profile)
+                        decision = self._verify(
+                            scene, model_action, legal_names, prediction, is_probe, profile)
+                        if (
+                            not self.dead.is_dead(signature)
+                            and decision.allowed
+                            and (not is_probe or self.memory.probes_this_level < self.config.max_physical_probes_per_level)
+                        ):
+                            self.last_model_milestone = milestone_name
+                            score = model_action.score + decision.score
+                            if score > best_score:
+                                best_score = score
+                                best_spec = ActionSpec(
+                                    name=model_action.name, data=model_action.data, source=model_action.source,
+                                    predicted_effect=model_action.predicted_effect if prediction is None else prediction.expected_effect,
+                                    score=score,
+                                    program_id=None if prediction is None else prediction.program_id,
+                                    predicted_state_key=None if prediction is None else _stable_hash_bytes(
+                                        prediction.grid.tobytes()),
+                                    goal_ids=decision.goal_ids,
+                                )
+                                best_is_probe = is_probe
+                                best_meta = {
+                                    "stage": "milestone_model_goal_verified" if profile.use_alignment else "milestone_model_verified",
+                                    "milestone": milestone_name,
+                                    "alignment": round(decision.score, 3),
+                                }
+                
+                if best_spec is not None:
+                    return best_spec, best_is_probe, best_meta
 
         # 7) Physical probes; EIG proxy comes from conditional hypothesis memory.
         probes: list[tuple[float, Candidate, AlignmentDecision]] = []
