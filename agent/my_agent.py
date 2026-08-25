@@ -4394,13 +4394,47 @@ class OptionalLocalReasoner:
 
     @staticmethod
     def _extract_json(text: str) -> dict[str, Any] | None:
-        for candidate in re.findall(r"\{(?:[^{}]|\{[^{}]*\})*\}", text, flags=re.S):
+        start_idx = text.find("{")
+        if start_idx == -1:
+            return None
+            
+        end_idx = text.rfind("}")
+        if end_idx != -1 and end_idx > start_idx:
+            candidate = text[start_idx:end_idx + 1]
             try:
                 obj = json.loads(candidate)
                 if isinstance(obj, dict):
                     return obj
             except json.JSONDecodeError:
+                pass
+                
+        brace_count = 0
+        in_string = False
+        escape = False
+        for i in range(start_idx, len(text)):
+            char = text[i]
+            if escape:
+                escape = False
                 continue
+            if char == "\\":
+                escape = True
+                continue
+            if char == '"':
+                in_string = not in_string
+                continue
+            if not in_string:
+                if char == "{":
+                    brace_count += 1
+                elif char == "}":
+                    brace_count -= 1
+                    if brace_count == 0:
+                        candidate = text[start_idx:i + 1]
+                        try:
+                            obj = json.loads(candidate)
+                            if isinstance(obj, dict):
+                                return obj
+                        except json.JSONDecodeError:
+                            pass
         return None
 
     @staticmethod
@@ -4516,13 +4550,10 @@ class OptionalLocalReasoner:
             for t in list(memory.transitions)[-8:]
         ]
         
-        feedback_str = f"PREVIOUS ATTEMPT FAILED: {feedback}\nPlease analyze the failure and propose 2 corrected hypotheses.\n" if feedback else "MANDATORY: Since this is your first response for this step, you MUST use the `inspect` or `python` tool to explore the state. Do NOT guess an abduction yet.\n"
-        
-        prompt = (
+        system_context = (
             "You control an unknown ARC-AGI-3 environment. You may inspect the "
             "grid, execute python to analyze the state, or output "
             "an abductive explanation of recent transitions. Emit ONE JSON object only per response.\n"
-            f"{feedback_str}"
             "Inspection schema: "
             '{"type":"inspect","expression":"state.find_color(3)"}\n'
             "Python schema (for data analysis only): "
@@ -4548,11 +4579,21 @@ class OptionalLocalReasoner:
             "A program is a highly valued hypothesis and will be replay-verified before use.\n"
         )
 
+        history_str = ""
         seen_expressions: set[str] = set()
         max_rounds = 8
         for round_index in range(max_rounds):
             if not self.available:
                 return None
+
+            if feedback:
+                instruction = f"PREVIOUS ATTEMPT FAILED: {feedback}\nPlease analyze the failure and propose corrected hypotheses.\n"
+            elif round_index == 0:
+                instruction = "MANDATORY: Since this is your first response for this step, you MUST use the `inspect` or `python` tool to explore the state. Do NOT guess an abduction yet.\n"
+            else:
+                instruction = "MANDATORY: You have already inspected the state. You MUST now propose an abduction hypothesis using the final abduction schema.\n"
+
+            prompt = system_context + instruction + history_str
             obj = self._generate_json(prompt, step)
             if not obj:
                 return None
@@ -4561,33 +4602,32 @@ class OptionalLocalReasoner:
                 obj.get("type", "action" if "action" in obj else "")).lower()
             if response_type == "python":
                 if round_index >= max_rounds - 1:
-                    prompt += "python_denied=tool_round_limit_reached\nReturn final action JSON now.\n"
+                    history_str += "python_denied=tool_round_limit_reached\nReturn final abduction JSON now.\n"
                     continue
                 code = str(obj.get("code", ""))
                 if not code or code in seen_expressions:
-                    prompt += "python_error=empty_or_repeated_code\nReturn final action JSON now.\n"
+                    history_str += "python_error=empty_or_repeated_code\nReturn final abduction JSON now.\n"
                     continue
                 seen_expressions.add(code)
                 try:
                     result_str = repl.exec_python_script(code, list(memory.transitions))
-                    prompt += (
+                    history_str += (
                         f"python_{round_index + 1}_result:\n{result_str}\n"
-                        "Return another inspection/python or the final action JSON.\n"
                     )
                 except Exception as exc:
-                    prompt += (
+                    history_str += (
                         f"python_{round_index + 1}_error={type(exc).__name__}:"
-                        f"{str(exc)[:180]}\nFix your python script or return the final action JSON.\n"
+                        f"{str(exc)[:180]}\nFix your python script or return the final abduction JSON.\n"
                     )
                 continue
 
             if response_type == "inspect":
                 if round_index >= self.config.model_tool_rounds:
-                    prompt += "inspection_denied=tool_round_limit_reached\nReturn final action JSON now.\n"
+                    history_str += "inspection_denied=tool_round_limit_reached\nReturn final abduction JSON now.\n"
                     continue
                 expression = str(obj.get("expression", ""))[:240].strip()
                 if not expression or expression in seen_expressions:
-                    prompt += "inspection_error=empty_or_repeated_expression\nReturn final action JSON now.\n"
+                    history_str += "inspection_error=empty_or_repeated_expression\nReturn final abduction JSON now.\n"
                     continue
                 seen_expressions.add(expression)
                 try:
@@ -4595,15 +4635,13 @@ class OptionalLocalReasoner:
                     rendered = json.dumps(result, separators=(",", ":"))
                     if len(rendered) > 2400:
                         rendered = rendered[:2400] + "...<truncated>"
-                    prompt += (
+                    history_str += (
                         f"inspection_{round_index + 1}_expression={expression!r}\n"
                         f"inspection_{round_index + 1}_result={rendered}\n"
-                        "Return another inspection or the final action JSON.\n"
                     )
                 except Exception as exc:
-                    prompt += (
-                        f"inspection_{round_index + 1}_error={type(exc).__name__}:"
-                        f"{str(exc)[:180]}\nReturn final action JSON now.\n"
+                    history_str += (
+                        f"inspection_{round_index + 1}_error={type(exc).__name__}:{str(exc)[:180]}\nReturn final abduction JSON now.\n"
                     )
                 continue
             if response_type == "abduction":
@@ -6046,6 +6084,7 @@ class MyAgent(Agent):
             self.step_index,
             response_frames=sequence.grids,
             runtime_tier=runtime_tier,
+            remaining_sec=self.runtime.remaining_sec(),
         )
         decision = {**decision, "runtime_tier": runtime_tier}
         signature = _action_signature(scene, spec)
