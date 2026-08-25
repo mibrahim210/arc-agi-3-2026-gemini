@@ -4323,19 +4323,29 @@ class OptionalLocalReasoner:
             "skipped_due_to_budget_exhaustion": 0,
             "skipped_due_to_lock_unavailable": 0,
             "skipped_due_to_model_unavailable": 0,
+            "skipped_due_to_cooldown_gate": 0,
         }
         self.reasoner_decision_successes = 0
         self.reasoner_consultations_this_level = 0
 
     @property
-    def available(self) -> bool:
+    def model_ready(self) -> bool:
         return (
             self.config.enable_model
             and bool(self.config.model_path)
             and not self._failed
-            and self.model_decisions_used < self.config.model_call_budget
+        )
+
+    @property
+    def budget_available(self) -> bool:
+        return (
+            self.model_decisions_used < self.config.model_call_budget
             and self.model_decisions_used_this_level < self.config.model_call_budget_per_level
         )
+
+    @property
+    def available(self) -> bool:
+        return self.model_ready and self.budget_available
 
     def reset_level(self) -> None:
         self.calls_this_level = 0
@@ -5523,12 +5533,18 @@ class MetacognitiveController:
         if profile.use_model and (milestone or is_stagnant_now):
             self.reasoner.reasoner_decision_attempts += 1
             skip_reason = None
-            if not self.reasoner.available:
+            
+            # Cooldown and milestone checks
+            cooldown = max(2, self.config.model_cooldown_steps // 2) if is_stagnant_now else self.config.model_cooldown_steps
+            has_milestone = (milestone or is_stagnant_now)
+            cooldown_satisfied = (step - self.reasoner.last_call_step >= cooldown)
+            
+            if not self.reasoner.model_ready:
                 skip_reason = "skipped_due_to_model_unavailable"
-            elif not self.reasoner.can_call(step, milestone, is_stagnant=is_stagnant_now):
-                if (self.reasoner.model_decisions_used >= self.config.model_call_budget
-                    or self.reasoner.model_decisions_used_this_level >= self.config.model_call_budget_per_level):
-                    skip_reason = "skipped_due_to_budget_exhaustion"
+            elif not self.reasoner.budget_available:
+                skip_reason = "skipped_due_to_budget_exhaustion"
+            elif not (has_milestone and cooldown_satisfied):
+                skip_reason = "skipped_due_to_cooldown_gate"
             elif remaining_sec is not None:
                 est_latency = max(10.0, self.reasoner.last_latency_sec)
                 projected_time = est_latency * 3.0
@@ -5548,6 +5564,7 @@ class MetacognitiveController:
                 # One model consultation (even if it does refinement rounds) counts as one decision-budget unit
                 self.reasoner.model_decisions_used += 1
                 self.reasoner.model_decisions_used_this_level += 1
+                self.reasoner.reasoner_consultations_this_level += 1
                 
                 for refinement_round in range(3):
                     proposals = self.reasoner.propose(
