@@ -3934,8 +3934,11 @@ class OptionalLocalReasoner:
             f"recent_transitions={json.dumps(recent, separators=(',', ':'))}\n"
             f"candidate_goals={json.dumps(list(goals_summary), separators=(',', ':'), default=str)}\n"
             f"verified_programs={json.dumps(list(programs_summary), separators=(',', ':'), default=str)}\n"
-            "Optional program schema (add inside proposal): \"program\":{\"kind\":\"translation|color_map|component_delete|component_recolor\",\"action\":\"ACTION1\",\"params\":{...}}. "
-            "A program is only a hypothesis and will be replay-verified before use.\n"
+            "Examples of Optional Program Hypotheses (add inside proposal):\n"
+            "- Color map: \"program\":{\"kind\":\"color_map\",\"action\":\"ACTION1\",\"params\":{\"mapping\":{\"3\":4}}}\n"
+            "- Translation: \"program\":{\"kind\":\"translation\",\"action\":\"ACTION6\",\"params\":{\"dx\":1,\"dy\":0,\"selector_color\":3,\"background\":0}}\n"
+            "- Delete: \"program\":{\"kind\":\"component_delete\",\"action\":\"ACTION2\",\"params\":{\"background\":0,\"clicked_color\":-1}}\n"
+            "A program is a highly valued hypothesis and will be replay-verified before use.\n"
         )
 
         seen_expressions: set[str] = set()
