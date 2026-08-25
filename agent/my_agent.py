@@ -2586,8 +2586,33 @@ class WorldProgram:
         if self.kind == "flip_v":
             return np.flipud(grid)
         if self.kind == "line_connect":
-            x1, y1 = self.payload.get("p1", (0, 0))
-            x2, y2 = self.payload.get("p2", (0, 0))
+            p1 = self.payload.get("p1")
+            p2 = self.payload.get("p2")
+            if p1 is None or p2 is None:
+                anchor = self._anchor(grid, action, scene)
+                if anchor is None:
+                    return None
+                x1, y1 = anchor
+                direction = str(self.payload.get("direction", "horizontal"))
+                background = int(self.payload.get("background", 0))
+                if direction == "vertical":
+                    top = y1
+                    while top > 0 and int(grid[top - 1, x1]) != background:
+                        top -= 1
+                    bottom = y1
+                    while bottom + 1 < grid.shape[0] and int(grid[bottom + 1, x1]) != background:
+                        bottom += 1
+                    p1, p2 = (x1, top), (x1, bottom)
+                else:
+                    left = x1
+                    while left > 0 and int(grid[y1, left - 1]) != background:
+                        left -= 1
+                    right = x1
+                    while right + 1 < grid.shape[1] and int(grid[y1, right + 1]) != background:
+                        right += 1
+                    p1, p2 = (left, y1), (right, y1)
+            x1, y1 = p1
+            x2, y2 = p2
             color = int(self.payload.get("color", 1))
             result = grid.copy()
             dx, dy = abs(x2 - x1), abs(y2 - y1)
@@ -2609,9 +2634,19 @@ class WorldProgram:
                     cy += sy
             return result
         if self.kind == "drag_component":
-            x1, y1 = self.payload.get("p1", (0, 0))
-            x2, y2 = self.payload.get("p2", (0, 0))
-            dx, dy = x2 - x1, y2 - y1
+            p1 = self.payload.get("p1")
+            p2 = self.payload.get("p2")
+            if p1 is not None and p2 is not None:
+                x1, y1 = p1
+                x2, y2 = p2
+                dx, dy = x2 - x1, y2 - y1
+            else:
+                anchor = self._anchor(grid, action, scene)
+                if anchor is None:
+                    return None
+                x1, y1 = anchor
+                dx = int(self.payload.get("dx", 0))
+                dy = int(self.payload.get("dy", 0))
             if not (0 <= x1 < grid.shape[1] and 0 <= y1 < grid.shape[0]):
                 return None
             color = int(grid[y1, x1])
@@ -2635,6 +2670,106 @@ class WorldProgram:
                 nx, ny = cx + dx, cy + dy
                 if 0 <= nx < grid.shape[1] and 0 <= ny < grid.shape[0]:
                     result[ny, nx] = color
+            return result
+        if self.kind == "gravity":
+            dx = int(self.payload.get("dx", 0))
+            dy = int(self.payload.get("dy", 0))
+            background = int(self.payload.get("background", 0))
+            if (dx, dy) not in {(0, 1), (0, -1), (1, 0), (-1, 0)}:
+                return None
+            result = np.full_like(grid, background)
+            if dx == 0:
+                for x in range(grid.shape[1]):
+                    values = [int(grid[y, x]) for y in range(grid.shape[0]) if int(grid[y, x]) != background]
+                    if dy > 0:
+                        start = grid.shape[0] - len(values)
+                        for idx, value in enumerate(values):
+                            result[start + idx, x] = value
+                    else:
+                        for idx, value in enumerate(values):
+                            result[idx, x] = value
+            else:
+                for y in range(grid.shape[0]):
+                    values = [int(grid[y, x]) for x in range(grid.shape[1]) if int(grid[y, x]) != background]
+                    if dx > 0:
+                        start = grid.shape[1] - len(values)
+                        for idx, value in enumerate(values):
+                            result[y, start + idx] = value
+                    else:
+                        for idx, value in enumerate(values):
+                            result[y, idx] = value
+            return result
+        if self.kind == "flood_fill":
+            anchor = self._anchor(grid, action, scene)
+            if anchor is None:
+                anchor = (int(self.payload.get("x", -1)), int(self.payload.get("y", -1)))
+            x, y = anchor
+            if not (0 <= x < grid.shape[1] and 0 <= y < grid.shape[0]):
+                return None
+            source_color = int(grid[y, x])
+            target_color = int(self.payload.get("target_color", source_color))
+            if source_color == target_color:
+                return grid.copy()
+            result = grid.copy()
+            stack = [(x, y)]
+            seen: set[Point] = set()
+            while stack:
+                cx, cy = stack.pop()
+                if (cx, cy) in seen or not (0 <= cx < grid.shape[1] and 0 <= cy < grid.shape[0]):
+                    continue
+                if int(grid[cy, cx]) != source_color:
+                    continue
+                seen.add((cx, cy))
+                result[cy, cx] = target_color
+                stack.extend(((cx + 1, cy), (cx - 1, cy), (cx, cy + 1), (cx, cy - 1)))
+            return result
+        if self.kind == "copy_pattern":
+            anchor = self._anchor(grid, action, scene)
+            if anchor is None:
+                return None
+            offsets = self.payload.get("offsets", ())
+            colors = self.payload.get("colors", ())
+            if not offsets or len(offsets) != len(colors):
+                return None
+            result = grid.copy()
+            ax, ay = anchor
+            for (dx, dy), color in zip(offsets, colors):
+                x, y = ax + int(dx), ay + int(dy)
+                if 0 <= x < grid.shape[1] and 0 <= y < grid.shape[0]:
+                    result[y, x] = int(color)
+            return result
+        if self.kind == "conditional_recolor":
+            source_color = self.payload.get("source_color")
+            target_color = self.payload.get("target_color")
+            neighbor_color = self.payload.get("neighbor_color")
+            if source_color is None or target_color is None or neighbor_color is None:
+                return None
+            result = grid.copy()
+            h, w = grid.shape
+            for y in range(h):
+                for x in range(w):
+                    if int(grid[y, x]) != int(source_color):
+                        continue
+                    for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                        nx, ny = x + dx, y + dy
+                        if 0 <= nx < w and 0 <= ny < h and int(grid[ny, nx]) == int(neighbor_color):
+                            result[y, x] = int(target_color)
+                            break
+            return result
+        if self.kind == "count_and_fill":
+            anchor = self._anchor(grid, action, scene)
+            if anchor is None:
+                return None
+            offsets = self.payload.get("offsets", ())
+            target_color = self.payload.get("target_color")
+            if not offsets or target_color is None:
+                return None
+            result = grid.copy()
+            ax, ay = anchor
+            for dx, dy in offsets:
+                x, y = ax + int(dx), ay + int(dy)
+                if 0 <= x < grid.shape[1] and 0 <= y < grid.shape[0]:
+                    result[y, x] = int(target_color)
             return result
         if self.kind in {"component_delete", "component_recolor"}:
             anchor = self._anchor(grid, action, scene)
@@ -2684,6 +2819,20 @@ class WorldProgram:
             return f"def step(grid, action): recolor_clicked_component(grid, action.x, action.y, {self.payload.get('target_color')})"
         if self.kind == "cellular_rule":
             return f"def step(grid, action): apply_local_rule_table(grid, rules={len(self.payload.get('rules', {}))})"
+        if self.kind == "line_connect":
+            return f"def step(grid, action): draw_line(grid, p1={self.payload.get('p1')}, p2={self.payload.get('p2')}, color={self.payload.get('color')})"
+        if self.kind == "drag_component":
+            return f"def step(grid, action): drag_component(grid, dx={self.payload.get('dx')}, dy={self.payload.get('dy')})"
+        if self.kind == "gravity":
+            return f"def step(grid, action): apply_gravity(grid, dx={self.payload.get('dx')}, dy={self.payload.get('dy')})"
+        if self.kind == "flood_fill":
+            return f"def step(grid, action): flood_fill(grid, x={self.payload.get('x')}, y={self.payload.get('y')}, color={self.payload.get('target_color')})"
+        if self.kind == "copy_pattern":
+            return f"def step(grid, action): copy_pattern(grid, cells={len(self.payload.get('offsets', ()))})"
+        if self.kind == "conditional_recolor":
+            return f"def step(grid, action): recolor_when_adjacent(grid, src={self.payload.get('source_color')}, nbr={self.payload.get('neighbor_color')}, dst={self.payload.get('target_color')})"
+        if self.kind == "count_and_fill":
+            return f"def step(grid, action): count_and_fill(grid, count={self.payload.get('count')}, cells={len(self.payload.get('offsets', ()))})"
         return "def step(grid, action): return exact_recorded_successor(grid, action)"
 
 
@@ -2818,7 +2967,7 @@ class ExecutableProgramLibrary:
                 )
                 if entity.entity_id == before.controlled_entity_id:
                     candidates.append(
-                        self._make("drag_component", action.name, {"dx": int(dx), "dy": int(dy)})
+                        self._make("drag_component", action.name, {"dx": int(dx), "dy": int(dy), "background": before.background})
                     )
 
         # gravity
@@ -2872,7 +3021,7 @@ class ExecutableProgramLibrary:
                                 left_bound = min_x == 0 or before.grid[y, min_x - 1] != before.background
                                 right_bound = max_x == before.width - 1 or before.grid[y, max_x + 1] != before.background
                                 if left_bound and right_bound:
-                                    candidates.append(self._make("line_connect", action.name, {"color": int(after.grid[ys[0], xs[0]]), "direction": "horizontal"}))
+                                    candidates.append(self._make("line_connect", action.name, {"color": int(after.grid[ys[0], xs[0]]), "p1": (int(min_x), int(y)), "p2": (int(max_x), int(y)), "background": before.background}))
                         elif is_vert:
                             if np.max(ys) - np.min(ys) + 1 == len(ys):
                                 x = xs[0]
@@ -2880,7 +3029,7 @@ class ExecutableProgramLibrary:
                                 top_bound = min_y == 0 or before.grid[min_y - 1, x] != before.background
                                 bottom_bound = max_y == before.height - 1 or before.grid[max_y + 1, x] != before.background
                                 if top_bound and bottom_bound:
-                                    candidates.append(self._make("line_connect", action.name, {"color": int(after.grid[ys[0], xs[0]]), "direction": "vertical"}))
+                                    candidates.append(self._make("line_connect", action.name, {"color": int(after.grid[ys[0], xs[0]]), "p1": (int(x), int(min_y)), "p2": (int(x), int(max_y)), "background": before.background}))
 
                 # copy_pattern
                 if len(xs) > 1:
@@ -2892,32 +3041,56 @@ class ExecutableProgramLibrary:
                             e_min_y = min(c[1] for c in e.cells)
                             e_shape = set((c[0] - e_min_x, c[1] - e_min_y) for c in e.cells)
                             if new_shape == e_shape:
+                                offsets: list[tuple[int, int]] = []
+                                colors: list[int] = []
                                 color_match = True
-                                for (nx, ny) in new_shape:
-                                    if after.grid[min_y + ny, min_x + nx] != before.grid[e_min_y + ny, e_min_x + nx]:
+                                for (nx, ny) in sorted(new_shape):
+                                    before_color = int(before.grid[e_min_y + ny, e_min_x + nx])
+                                    after_color = int(after.grid[min_y + ny, min_x + nx])
+                                    if after_color != before_color:
                                         color_match = False
                                         break
+                                    offsets.append((int(nx), int(ny)))
+                                    colors.append(before_color)
                                 if color_match:
-                                    candidates.append(self._make("copy_pattern", action.name, {"source_entity_id": e.entity_id}))
+                                    candidates.append(self._make("copy_pattern", action.name, {"source_entity_id": e.entity_id, "offsets": tuple(offsets), "colors": tuple(colors)}))
                                     break
 
                 # count_and_fill
                 count = len(xs)
-                for e in before.entities:
-                    if len(e.cells) == count:
-                        min_x, max_x = np.min(xs), np.max(xs)
-                        min_y, max_y = np.min(ys), np.max(ys)
-                        if (max_x - min_x + 1) * (max_y - min_y + 1) == count:
-                            candidates.append(self._make("count_and_fill", action.name, {"count": count, "target_color": int(after.grid[ys[0], xs[0]])}))
-                            break
+                min_x, max_x = np.min(xs), np.max(xs)
+                min_y, max_y = np.min(ys), np.max(ys)
+                if (max_x - min_x + 1) * (max_y - min_y + 1) == count:
+                    offsets = tuple(sorted((int(x - min_x), int(y - min_y)) for x, y in zip(xs, ys)))
+                    source_sizes = Counter(len(e.cells) for e in before.entities)
+                    if source_sizes.get(count, 0) == 1:
+                        candidates.append(self._make("count_and_fill", action.name, {"count": count, "target_color": int(after.grid[ys[0], xs[0]]), "offsets": offsets}))
             
             # conditional_recolor
             if not mapping_valid:
                 target_colors = set(after.grid[changed])
                 if len(target_colors) == 1:
                     target_c = list(target_colors)[0]
-                    if target_c not in set(before.grid[changed]):
-                        candidates.append(self._make("conditional_recolor", action.name, {"target_color": int(target_c)}))
+                    source_colors = set(before.grid[changed])
+                    if len(source_colors) == 1 and target_c not in source_colors:
+                        source_c = int(next(iter(source_colors)))
+                        neighbor_counts: Counter[int] = Counter()
+                        valid = True
+                        for x, y in zip(xs, ys):
+                            local_neighbors = {
+                                int(before.grid[ny, nx])
+                                for nx, ny in ((x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1))
+                                if 0 <= nx < before.width and 0 <= ny < before.height and int(before.grid[ny, nx]) != source_c
+                            }
+                            if not local_neighbors:
+                                valid = False
+                                break
+                            for color in local_neighbors:
+                                neighbor_counts[color] += 1
+                        if valid and neighbor_counts:
+                            neighbor_color, support = neighbor_counts.most_common(1)[0]
+                            if support >= len(xs):
+                                candidates.append(self._make("conditional_recolor", action.name, {"source_color": source_c, "target_color": int(target_c), "neighbor_color": int(neighbor_color)}))
                     
         data = action.data_dict
         if "x" in data and "y" in data and len(changed[0]) > 1:
@@ -3185,19 +3358,24 @@ class ExecutableProgramLibrary:
             elif kind == "component_recolor":
                 payload = {"target_color": int(params["target_color"]), "background": int(params.get("background", 0)), "clicked_color": int(params.get("clicked_color", -1))}
             elif kind == "line_connect":
-                payload = {"color": int(params["color"]), "direction": str(params["direction"])}
+                if "p1" in params and "p2" in params:
+                    x1, y1 = params["p1"]
+                    x2, y2 = params["p2"]
+                    payload = {"color": int(params["color"]), "p1": (int(x1), int(y1)), "p2": (int(x2), int(y2)), "background": int(params.get("background", 0))}
+                else:
+                    payload = {"color": int(params["color"]), "direction": str(params["direction"]), "background": int(params.get("background", 0))}
             elif kind == "drag_component":
-                payload = {"dx": int(params["dx"]), "dy": int(params["dy"])}
+                payload = {"dx": int(params["dx"]), "dy": int(params["dy"]), "background": int(params.get("background", 0))}
             elif kind == "gravity":
-                payload = {"dx": int(params["dx"]), "dy": int(params["dy"])}
+                payload = {"dx": int(params["dx"]), "dy": int(params["dy"]), "background": int(params.get("background", 0))}
             elif kind == "flood_fill":
                 payload = {"x": int(params["x"]), "y": int(params["y"]), "target_color": int(params["target_color"])}
             elif kind == "copy_pattern":
-                payload = {"source_entity_id": str(params["source_entity_id"])}
+                payload = {"source_entity_id": str(params.get("source_entity_id", "")), "offsets": tuple((int(x), int(y)) for x, y in params["offsets"]), "colors": tuple(int(v) for v in params["colors"])}
             elif kind == "conditional_recolor":
-                payload = {"target_color": int(params["target_color"])}
+                payload = {"source_color": int(params["source_color"]), "target_color": int(params["target_color"]), "neighbor_color": int(params["neighbor_color"])}
             elif kind == "count_and_fill":
-                payload = {"count": int(params["count"]), "target_color": int(params["target_color"])}
+                payload = {"count": int(params["count"]), "target_color": int(params["target_color"]), "offsets": tuple((int(x), int(y)) for x, y in params["offsets"])}
             else:
                 return None
         except Exception:
@@ -3479,15 +3657,27 @@ class ControlledAssembly:
 class ControlInference:
     def __init__(self, config: Config) -> None:
         self.config = config
-        self.recent_moves: list[tuple[tuple[str, int, int], ...]] = []
+        self.recent_observations: list[tuple[tuple[tuple[str, int, int], ...], bool]] = []
+        self._last_diagnostics: dict[str, Any] = {}
 
     def record(self, transition: Transition) -> None:
         if transition.event.entity_moves:
-            self.recent_moves.append(transition.event.entity_moves)
-            if len(self.recent_moves) > self.config.control_group_max_gap + 2:
-                self.recent_moves.pop(0)
+            self.recent_observations.append((transition.event.entity_moves, bool(transition.action.data)))
+            if len(self.recent_observations) > self.config.control_group_max_gap + 2:
+                self.recent_observations.pop(0)
 
     def controlled_assembly(self, scene: Scene) -> ControlledAssembly | None:
+        self._last_diagnostics = {
+            "control_group_candidate_count": 0,
+            "control_group_joint_moves": 0,
+            "control_group_total_moves": 0,
+            "control_group_confidence": 0.0,
+            "control_group_coherence": 0.0,
+            "control_group_membership_stability": 0.0,
+            "control_group_spatial_coherence": 0.0,
+            "control_group_complex_ratio": 0.0,
+            "control_group_rejection_reason": "",
+        }
         if not scene.controlled_entity_id:
             return None
         
@@ -3498,12 +3688,17 @@ class ControlInference:
         co_movers = {scene.controlled_entity_id}
         joint_moves = 0
         total_moves = 0
+        coherent_match_sum = 0.0
+        complex_moves = 0
+        support_sets: list[set[str]] = []
         
-        if self.config.enable_control_groups and self.recent_moves:
-            for move_set in self.recent_moves:
+        if self.config.enable_control_groups and self.recent_observations:
+            for move_set, is_complex in self.recent_observations:
                 ctrl_move = next(( (dx, dy) for eid, dx, dy in move_set if eid == scene.controlled_entity_id ), None)
                 if ctrl_move is not None:
                     total_moves += 1
+                    if is_complex:
+                        complex_moves += 1
                     cdx, cdy = ctrl_move
                     matching = {eid for eid, dx, dy in move_set if dx == cdx and dy == cdy}
                     if len(co_movers) == 1:
@@ -3516,10 +3711,44 @@ class ControlInference:
                             co_movers.intersection_update(matching)
                     if len(co_movers) > 1:
                         joint_moves += 1
+                        support_sets.append(set(matching))
+                        coherent_match_sum += len(matching.intersection(co_movers)) / max(1, len(co_movers))
         
-        if len(co_movers) >= self.config.control_group_min_members and len(co_movers) <= self.config.control_group_max_members:
+        self._last_diagnostics["control_group_candidate_count"] = len(co_movers)
+        self._last_diagnostics["control_group_joint_moves"] = joint_moves
+        self._last_diagnostics["control_group_total_moves"] = total_moves
+        complex_ratio = complex_moves / max(1, total_moves)
+        self._last_diagnostics["control_group_complex_ratio"] = complex_ratio
+        if total_moves < self.config.control_applicability_min_observations:
+            self._last_diagnostics["control_group_rejection_reason"] = "insufficient_observations"
+        elif complex_ratio > self.config.control_complex_action_ratio:
+            self._last_diagnostics["control_group_rejection_reason"] = "complex_ratio_too_high"
+        
+        if (
+            total_moves >= self.config.control_applicability_min_observations
+            and complex_ratio <= self.config.control_complex_action_ratio
+            and len(co_movers) >= self.config.control_group_min_members
+            and len(co_movers) <= self.config.control_group_max_members
+        ):
             confidence = joint_moves / max(1, total_moves)
-            if joint_moves >= self.config.control_group_min_support and confidence >= self.config.control_group_min_confidence:
+            coherence = coherent_match_sum / max(1, joint_moves)
+            stability = 0.0
+            if len(support_sets) >= 2:
+                overlaps = []
+                for prev, curr in zip(support_sets, support_sets[1:]):
+                    overlaps.append(len(prev.intersection(curr)) / max(1, len(prev.union(curr))))
+                stability = float(sum(overlaps) / max(1, len(overlaps)))
+            elif support_sets:
+                stability = 1.0
+            self._last_diagnostics["control_group_confidence"] = confidence
+            self._last_diagnostics["control_group_coherence"] = coherence
+            self._last_diagnostics["control_group_membership_stability"] = stability
+            if (
+                joint_moves >= self.config.control_group_min_support
+                and confidence >= self.config.control_group_min_confidence
+                and coherence >= self.config.control_group_min_coherence
+                and stability >= self.config.control_group_membership_overlap
+            ):
                 cells = []
                 for eid in co_movers:
                     e = next((x for x in scene.entities if x.entity_id == eid), None)
@@ -3534,6 +3763,7 @@ class ControlInference:
                     bbox = (min(xs), min(ys), max(xs) - min(xs) + 1, max(ys) - min(ys) + 1)
                     bbox_area = bbox[2] * bbox[3]
                     spatial_coherence = len(cells) / max(1, bbox_area)
+                    self._last_diagnostics["control_group_spatial_coherence"] = spatial_coherence
                     if spatial_coherence >= self.config.control_group_min_spatial_coherence:
                         return ControlledAssembly(
                             centroid=(cx, cy),
@@ -3543,6 +3773,9 @@ class ControlInference:
                             representative_entity_id=scene.controlled_entity_id,
                             confidence=confidence,
                         )
+                    self._last_diagnostics["control_group_rejection_reason"] = "spatial_coherence_too_low"
+            else:
+                self._last_diagnostics["control_group_rejection_reason"] = "confidence_or_coherence_too_low"
                 
         return ControlledAssembly(
             centroid=controlled_e.centroid,
@@ -3557,6 +3790,7 @@ class ControlInference:
         return {
             "controlled_entity_id": scene.controlled_entity_id,
             "entity_confidence": scene.entity_confidence,
+            **self._last_diagnostics,
         }
 
 
