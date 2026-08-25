@@ -231,6 +231,7 @@ class Config:
         "DEWMA_FRONTIER_TRIGGER_NOOPS", 2)
     program_replay_window: int = _env_int("DEWMA_PROGRAM_REPLAY_WINDOW", 16)
     program_verify_limit: int = _env_int("DEWMA_PROGRAM_VERIFY_LIMIT", 64)
+    min_time_for_llm_sec: int = _env_int("DEWMA_MIN_TIME_FOR_LLM", 45)
 
 
     trace_enabled: bool = _env_bool("DEWMA_TRACE_ENABLED", True)
@@ -533,6 +534,12 @@ class DiagnosticTraceRecord:
     deterministic_latency_sec: float = 0.0
     remaining_wall_time_sec: float | None = None
     runtime_tier: str = "A9"
+    model_decisions_used: int = 0
+    model_decisions_used_this_level: int = 0
+    reasoner_decision_attempts: int = 0
+    reasoner_decision_skips_by_reason: dict[str, int] = field(default_factory=dict)
+    reasoner_decision_successes: int = 0
+    reasoner_consultations_this_level: int = 0
 
 
 @dataclass(slots=True)
@@ -3166,9 +3173,9 @@ class ExecutableProgramLibrary:
                     "cellular_rule", action.name, {"rules": rules}))
         return candidates
 
-    def _verify(self, program: WorldProgram, transition: Transition, before_scene: Scene | None = None) -> None:
+    def _verify(self, program: WorldProgram, transition: Transition, before_scene: Scene | None = None) -> bool:
         if transition.before_grid is None or transition.after_grid is None:
-            return
+            return False
         replay_id = _stable_hash_bytes(
             repr(
                 (
@@ -3182,11 +3189,11 @@ class ExecutableProgramLibrary:
             12,
         )
         if replay_id in program.verified_replay_ids:
-            return
+            return False
         predicted = program.simulate(
             transition.before_grid, transition.action, before_scene)
         if predicted is None or predicted.shape != transition.after_grid.shape:
-            return
+            return True
         program.verified_replay_ids.add(replay_id)
         program.eligible_replays += 1
         exact = np.array_equal(predicted, transition.after_grid)
@@ -3213,6 +3220,7 @@ class ExecutableProgramLibrary:
             program.status = "verified"
         elif program.current_level_conflicts > program.current_level_support + 1:
             program.status = "rejected"
+        return True
 
     def _trim(self) -> None:
         if len(self.programs) <= self.config.max_programs:
@@ -3244,14 +3252,29 @@ class ExecutableProgramLibrary:
         self._simulation_cache.clear()
         self.recent_transitions.append(transition)
         candidates = self._induce_candidates(transition, before, after)
-        # Verify new and existing applicable programs against recent replay.
+        
+        verify_budget = self.config.program_verify_limit
+        replay_slice = list(self.recent_transitions)[-self.config.program_replay_window:]
+        
+        # Verify newly induced candidates against recent replay slice
+        # Use reversed order to evaluate most recent transitions first
         for program in candidates:
-            for replay in list(self.recent_transitions)[-48:]:
-                self._verify(program, replay,
-                             before if replay is transition else None)
+            if verify_budget <= 0:
+                break
+            for replay in reversed(replay_slice):
+                if verify_budget <= 0:
+                    break
+                if self._verify(program, replay, before if replay is transition else None):
+                    verify_budget -= 1
+                    
+        # Verify existing retained programs against the single new transition
         for program in list(self.programs.values()):
+            if verify_budget <= 0:
+                break
             if program not in candidates and program.status != "rejected":
-                self._verify(program, transition, before)
+                if self._verify(program, transition, before):
+                    verify_budget -= 1
+                    
         self._trim()
 
     def predict_grid(
@@ -4291,14 +4314,27 @@ class OptionalLocalReasoner:
         self._failed = False
         self._model = None
 
+        self.model_decisions_used = 0
+        self.model_decisions_used_this_level = 0
+        self.reasoner_decision_attempts = 0
+        self.reasoner_decision_skips_by_reason = {
+            "skipped_due_to_low_remaining_time": 0,
+            "skipped_due_to_projected_latency": 0,
+            "skipped_due_to_budget_exhaustion": 0,
+            "skipped_due_to_lock_unavailable": 0,
+            "skipped_due_to_model_unavailable": 0,
+        }
+        self.reasoner_decision_successes = 0
+        self.reasoner_consultations_this_level = 0
+
     @property
     def available(self) -> bool:
         return (
             self.config.enable_model
             and bool(self.config.model_path)
             and not self._failed
-            and self.calls < self.config.model_call_budget
-            and self.calls_this_level < self.config.model_call_budget_per_level
+            and self.model_decisions_used < self.config.model_call_budget
+            and self.model_decisions_used_this_level < self.config.model_call_budget_per_level
         )
 
     def reset_level(self) -> None:
@@ -4309,6 +4345,8 @@ class OptionalLocalReasoner:
         self.llm_action_progress = 0
         self.llm_program_progress = 0
         self.llm_abduction_prior_shift_progress = 0
+        self.model_decisions_used_this_level = 0
+        self.reasoner_consultations_this_level = 0
 
     def _load(self) -> bool:
         if self._model is not None:
@@ -4385,7 +4423,7 @@ class OptionalLocalReasoner:
         return repr(value)
 
     def _generate_json(self, prompt: str, step: int) -> dict[str, Any] | None:
-        if not self.available:
+        if not self.config.enable_model or self._failed:
             return None
 
         # Thread-safe non-blocking mutex lock for Ollama concurrency protection.
@@ -4451,9 +4489,14 @@ class OptionalLocalReasoner:
         programs_summary: Sequence[Mapping[str, Any]] = (),
         response_frames: Sequence[np.ndarray] = (),
         feedback: str = "",
+        bypass_can_call: bool = False,
     ) -> list[AbductionProposal] | None:
-        if not self.can_call(step, milestone=True) or not self._load():
-            return None
+        if not bypass_can_call:
+            if not self.can_call(step, milestone=True) or not self._load():
+                return None
+        else:
+            if not self._load():
+                return None
 
         inspector = GridInspector(
             scene.grid, scene.previous_grid, response_frames)
@@ -5269,6 +5312,7 @@ class MetacognitiveController:
         step: int,
         response_frames: Sequence[np.ndarray] = (),
         runtime_tier: str = "A9",
+        remaining_sec: float | None = None,
     ) -> tuple[ActionSpec, bool, dict[str, Any]]:
         profile = _runtime_profile(runtime_tier, self.config)
         legal_names = {action.name for action in legal_actions}
@@ -5437,82 +5481,110 @@ class MetacognitiveController:
         # 6) Milestone-gated local model for A7/A8/A9 only.
         milestone, milestone_name = self._milestone(scene, step)
         is_stagnant_now = is_looping or self.memory.no_op_streak >= self.config.no_progress_consecutive_threshold
-        if profile.use_model and self.reasoner.can_call(step, milestone, is_stagnant=is_stagnant_now):
-            current_feedback = ""
-            for refinement_round in range(3):
-                if not self.reasoner.can_call(step, milestone, is_stagnant=is_stagnant_now):
-                    break
-                proposals = self.reasoner.propose(
-                    scene, sorted(legal_names), self.memory, step,
-                    goals_summary=self.goals.summary() if profile.use_goals else (),
-                    programs_summary=self.programs.summary() if profile.use_programs else (),
-                    response_frames=response_frames,
-                    feedback=current_feedback,
-                )
-                if proposals is not None:
-                    best_spec = None
-                    best_is_probe = False
-                    best_meta = None
-                    best_score = -999.0
-                    
-                    failed_summaries = []
-                    
-                    for proposal in proposals:
-                        if proposal.puzzle_family is not None:
-                            self.goals.adjust_priors(proposal.puzzle_family)
-                        if proposal.program_spec is not None and profile.use_programs:
-                            self.reasoner.abductions_parsed += 1
-                            self.programs.ingest_model_program(
-                                proposal.program_spec, list(self.memory.transitions))
+        
+        if profile.use_model and (milestone or is_stagnant_now):
+            self.reasoner.reasoner_decision_attempts += 1
+            skip_reason = None
+            if not self.reasoner.available:
+                skip_reason = "skipped_due_to_model_unavailable"
+            elif not self.reasoner.can_call(step, milestone, is_stagnant=is_stagnant_now):
+                if (self.reasoner.model_decisions_used >= self.config.model_call_budget
+                    or self.reasoner.model_decisions_used_this_level >= self.config.model_call_budget_per_level):
+                    skip_reason = "skipped_due_to_budget_exhaustion"
+            elif remaining_sec is not None:
+                est_latency = max(10.0, self.reasoner.last_latency_sec)
+                projected_time = est_latency * 3.0
+                if remaining_sec < self.config.min_time_for_llm_sec:
+                    skip_reason = "skipped_due_to_low_remaining_time"
+                elif remaining_sec < projected_time:
+                    skip_reason = "skipped_due_to_projected_latency"
+            
+            # Lock availability check
+            if not skip_reason and _OLLAMA_LOCK.locked():
+                skip_reason = "skipped_due_to_lock_unavailable"
+                
+            if skip_reason:
+                self.reasoner.reasoner_decision_skips_by_reason[skip_reason] += 1
+            else:
+                current_feedback = ""
+                # One model consultation (even if it does refinement rounds) counts as one decision-budget unit
+                self.reasoner.model_decisions_used += 1
+                self.reasoner.model_decisions_used_this_level += 1
+                
+                for refinement_round in range(3):
+                    proposals = self.reasoner.propose(
+                        scene, sorted(legal_names), self.memory, step,
+                        goals_summary=self.goals.summary() if profile.use_goals else (),
+                        programs_summary=self.programs.summary() if profile.use_programs else (),
+                        response_frames=response_frames,
+                        feedback=current_feedback,
+                        bypass_can_call=True,
+                    )
+                    if proposals is not None:
+                        best_spec = None
+                        best_is_probe = False
+                        best_meta = None
+                        best_score = -999.0
                         
-                        model_action = proposal.action
-                        if model_action is not None:
-                            signature = _action_signature(scene, model_action)
-                            is_probe = self.memory.tried_count(
-                                scene.exact_key, model_action) == 0
-                            prediction = self._predict(scene, model_action, profile)
-                            decision = self._verify(
-                                scene, model_action, legal_names, prediction, is_probe, profile)
-                            if (
-                                not self.dead.is_dead(signature)
-                                and decision.allowed
-                                and (not is_probe or self.memory.probes_this_level < self.config.max_physical_probes_per_level)
-                            ):
-                                self.last_model_milestone = milestone_name
-                                score = model_action.score + decision.score
-                                if score > best_score:
-                                    best_score = score
-                                    best_spec = ActionSpec(
-                                        name=model_action.name, data=model_action.data, source=model_action.source,
-                                        predicted_effect=model_action.predicted_effect if prediction is None else prediction.expected_effect,
-                                        score=score,
-                                        program_id=None if prediction is None else prediction.program_id,
-                                        predicted_state_key=None if prediction is None else _stable_hash_bytes(
-                                            prediction.grid.tobytes()),
-                                        goal_ids=decision.goal_ids,
-                                    )
-                                    best_is_probe = is_probe
-                                    best_meta = {
-                                        "stage": "milestone_model_goal_verified" if profile.use_alignment else "milestone_model_verified",
-                                        "milestone": milestone_name,
-                                        "alignment": round(decision.score, 3),
-                                    }
-                            else:
-                                if proposal.program_spec is not None:
-                                    kind = str(proposal.program_spec.get("kind", ""))
-                                    failed_summaries.append(f"Program kind '{kind}' resulted in verification score {round(decision.score, 2)}")
+                        failed_summaries = []
+                        
+                        for proposal in proposals:
+                            if proposal.puzzle_family is not None:
+                                self.goals.adjust_priors(proposal.puzzle_family)
+                            if proposal.program_spec is not None and profile.use_programs:
+                                self.reasoner.abductions_parsed += 1
+                                self.programs.ingest_model_program(
+                                    proposal.program_spec, list(self.memory.transitions))
+                            
+                            model_action = proposal.action
+                            if model_action is not None:
+                                signature = _action_signature(scene, model_action)
+                                is_probe = self.memory.tried_count(
+                                    scene.exact_key, model_action) == 0
+                                prediction = self._predict(scene, model_action, profile)
+                                decision = self._verify(
+                                    scene, model_action, legal_names, prediction, is_probe, profile)
+                                if (
+                                    not self.dead.is_dead(signature)
+                                    and decision.allowed
+                                    and (not is_probe or self.memory.probes_this_level < self.config.max_physical_probes_per_level)
+                                ):
+                                    self.last_model_milestone = milestone_name
+                                    score = model_action.score + decision.score
+                                    if score > best_score:
+                                        best_score = score
+                                        best_spec = ActionSpec(
+                                            name=model_action.name, data=model_action.data, source=model_action.source,
+                                            predicted_effect=model_action.predicted_effect if prediction is None else prediction.expected_effect,
+                                            score=score,
+                                            program_id=None if prediction is None else prediction.program_id,
+                                            predicted_state_key=None if prediction is None else _stable_hash_bytes(
+                                                prediction.grid.tobytes()),
+                                            goal_ids=decision.goal_ids,
+                                        )
+                                        best_is_probe = is_probe
+                                        best_meta = {
+                                            "stage": "milestone_model_goal_verified" if profile.use_alignment else "milestone_model_verified",
+                                            "milestone": milestone_name,
+                                            "alignment": round(decision.score, 3),
+                                        }
                                 else:
-                                    failed_summaries.append(f"Action {model_action.name} resulted in verification score {round(decision.score, 2)}")
-                    
-                    if best_spec is not None:
-                        return best_spec, best_is_probe, best_meta
-                    
-                    if failed_summaries:
-                        current_feedback = " | ".join(failed_summaries)
+                                    if proposal.program_spec is not None:
+                                        kind = str(proposal.program_spec.get("kind", ""))
+                                        failed_summaries.append(f"Program kind '{kind}' resulted in verification score {round(decision.score, 2)}")
+                                    else:
+                                        failed_summaries.append(f"Action {model_action.name} resulted in verification score {round(decision.score, 2)}")
+                        
+                        if best_spec is not None:
+                            self.reasoner.reasoner_decision_successes += 1
+                            return best_spec, best_is_probe, best_meta
+                        
+                        if failed_summaries:
+                            current_feedback = " | ".join(failed_summaries)
+                        else:
+                            current_feedback = "All proposals rejected due to parsing or validation constraints."
                     else:
-                        current_feedback = "All proposals rejected due to parsing or validation constraints."
-                else:
-                    break
+                        break
 
         # 7) Physical probes; EIG proxy comes from conditional hypothesis memory.
         probes: list[tuple[float, Candidate, AlignmentDecision]] = []
@@ -5601,6 +5673,14 @@ class MyAgent(Agent):
         self.diagnostic_logger = DiagnosticTraceLogger(self.config)
         self.pending_reasoning: dict[str, Any] = {}
         self.pending_decision_latency_sec = 0.0
+
+    def __del__(self) -> None:
+        try:
+            if hasattr(self, "diagnostic_logger"):
+                self.diagnostic_logger.flush(
+                    str(getattr(self, "game_id", "unknown")))
+        except Exception:
+            pass
 
     def _construct_modules(self) -> None:
         self.perception = PerceptionSystem(self.config)
@@ -5842,6 +5922,12 @@ class MyAgent(Agent):
             remaining_wall_time_sec=self.runtime.remaining_sec(),
             runtime_tier=str(self.pending_reasoning.get(
                 "runtime_tier", self.runtime.tier())),
+            model_decisions_used=int(self.pending_reasoning.get("model_decisions_used", 0)),
+            model_decisions_used_this_level=int(self.pending_reasoning.get("model_decisions_used_this_level", 0)),
+            reasoner_decision_attempts=int(self.pending_reasoning.get("reasoner_decision_attempts", 0)),
+            reasoner_decision_skips_by_reason=dict(self.pending_reasoning.get("reasoner_decision_skips_by_reason", {})),
+            reasoner_decision_successes=int(self.pending_reasoning.get("reasoner_decision_successes", 0)),
+            reasoner_consultations_this_level=int(self.pending_reasoning.get("reasoner_consultations_this_level", 0)),
         )
         self.diagnostic_logger.record(record)
 
@@ -6035,6 +6121,12 @@ class MyAgent(Agent):
             "llm_action_progress": self.reasoner.llm_action_progress,
             "llm_program_progress": self.reasoner.llm_program_progress,
             "llm_abduction_prior_shift_progress": self.reasoner.llm_abduction_prior_shift_progress,
+            "model_decisions_used": self.reasoner.model_decisions_used,
+            "model_decisions_used_this_level": self.reasoner.model_decisions_used_this_level,
+            "reasoner_decision_attempts": self.reasoner.reasoner_decision_attempts,
+            "reasoner_decision_skips_by_reason": self.reasoner.reasoner_decision_skips_by_reason,
+            "reasoner_decision_successes": self.reasoner.reasoner_decision_successes,
+            "reasoner_consultations_this_level": self.reasoner.reasoner_consultations_this_level,
         }
         if event is not None:
             reasoning["previous_event"] = {
