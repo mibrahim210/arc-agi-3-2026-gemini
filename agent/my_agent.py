@@ -1965,6 +1965,23 @@ def _symmetry_score(grid: np.ndarray) -> float:
     vertical = float(np.mean(grid == np.flipud(grid)))
     return max(horizontal, vertical)
 
+def classify_puzzle_family(grid: np.ndarray) -> str:
+    """Soft classifier for initializing goal priors."""
+    bg = int(np.bincount(grid.ravel()).argmax())
+    mask = grid != bg
+    density = float(np.mean(mask))
+    unique_colors = len(np.unique(grid))
+    
+    if density < 0.15:
+        return "pathfinding"
+    if unique_colors > 6 and density > 0.6:
+        return "color_matching"
+    from scipy.ndimage import label
+    labeled, num_features = label(mask)
+    if num_features > 10 and density < 0.5:
+        return "field_diffusion"
+    return "geometric_transformation"
+
 
 class GoalHypothesisManager:
     """Maintains several candidate objectives instead of collapsing early.
@@ -1980,17 +1997,22 @@ class GoalHypothesisManager:
         self.hypotheses: dict[str, GoalHypothesis] = {}
         self.transfer_priors: Counter[tuple[str,
                                             tuple[tuple[str, Any], ...]]] = Counter()
-        self.level_start_grid: np.ndarray | None = None
+        self.level_start_grid = None
         self.level_start_components = 0
         self._counter = 0
         self._value_cache: dict[str, float] = {}
+        self.transitions_processed = 0
+        self.top_goal_id = None
+        self.transitions_until_stabilized = 0
 
     def reset_level(self, scene: Scene | None = None) -> None:
         self.hypotheses.clear()
-        self._value_cache.clear()
         self.level_start_grid = None if scene is None else scene.grid.copy()
         self.level_start_components = 0 if scene is None else len(
             scene.components)
+        self.transitions_processed = 0
+        self.top_goal_id = None
+        self.transitions_until_stabilized = 0
         if scene is not None:
             self.seed(scene)
 
@@ -2025,36 +2047,65 @@ class GoalHypothesisManager:
         self.hypotheses[goal.goal_id] = goal
         self._trim()
         return goal
+        
+    def adjust_priors(self, puzzle_family: str) -> None:
+        """Dynamically reweight active goals based on an abducted puzzle family."""
+        family = puzzle_family.lower().strip()
+        for goal in self.hypotheses.values():
+            if goal.status != "active":
+                continue
+            boost = 0.0
+            if family == "pathfinding" and goal.kind in ("reach_or_touch_color", "connect_colors"):
+                boost = 0.15
+            elif family == "color_matching" and goal.kind in ("collect_color", "match_patterns"):
+                boost = 0.15
+            elif family == "field_diffusion" and goal.kind in ("expand_region", "flood_fill"):
+                boost = 0.15
+            
+            if boost > 0.0:
+                goal.confidence = min(0.95, goal.confidence + boost)
+                goal.source = f"llm_abduction_{family}"
+                self._value_cache.clear()
 
     def _trim(self) -> None:
-        if len(self.hypotheses) <= self.config.max_goal_hypotheses:
-            return
-        ranked = sorted(
-            self.hypotheses.values(),
-            key=lambda g: (g.status == "active", g.confidence,
-                           g.support - g.contradictions),
-            reverse=True,
-        )[: self.config.max_goal_hypotheses]
-        self.hypotheses = {g.goal_id: g for g in ranked}
+        if len(self.hypotheses) > self.config.max_goal_hypotheses:
+            ranked = sorted(
+                self.hypotheses.values(),
+                key=lambda g: (g.status == "active", g.confidence,
+                               g.support - g.contradictions),
+                reverse=True,
+            )[: self.config.max_goal_hypotheses]
+            self.hypotheses = {g.goal_id: g for g in ranked}
+            
+        active_goals = [g for g in self.hypotheses.values() if g.status == "active"]
+        if active_goals:
+            current_top = max(active_goals, key=lambda g: g.confidence).goal_id
+            if current_top != self.top_goal_id:
+                self.top_goal_id = current_top
+                self.transitions_until_stabilized = self.transitions_processed
 
     def seed(self, scene: Scene) -> None:
         if self.level_start_grid is None:
             self.level_start_grid = scene.grid.copy()
             self.level_start_components = len(scene.components)
+        
+        family = classify_puzzle_family(scene.grid)
+        pathfinding_boost = 0.15 if family == "pathfinding" else 0.0
+        
         non_background = [(c, n)
                           for c, n in scene.color_counts if c != scene.background]
         non_background.sort(key=lambda item: item[1])
-        for index, (color, count) in enumerate(non_background[:4]):
+        for index, (color, count) in enumerate(non_background):
             self._add(
                 "collect_color",
                 {"color": color, "baseline_count": count},
-                0.20 if count <= 12 else 0.10,
+                (0.20 if count <= 12 else 0.10) + (0.10 if family == "color_matching" else 0.0),
                 "rare_quantity_prior",
             )
             self._add(
                 "reach_or_touch_color",
                 {"color": color},
-                0.24 if count <= 9 else 0.12,
+                (0.24 if count <= 9 else 0.12) + pathfinding_boost,
                 "affordance_prior",
             )
             if index < 3 and count <= 16:
@@ -2251,6 +2302,7 @@ class GoalHypothesisManager:
 
     def update(self, transition: Transition, before: Scene, after: Scene) -> None:
         self._value_cache.clear()
+        self.transitions_processed += 1
         if not self.hypotheses:
             self.seed(before)
         event = transition.event
