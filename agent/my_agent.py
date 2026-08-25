@@ -601,9 +601,11 @@ class AlignmentDecision:
 
 
 @dataclass(frozen=True, slots=True)
-class ReasonerProposal:
+class AbductionProposal:
     action: ActionSpec | None
     program_spec: Mapping[str, Any] | None = None
+    goal_spec: Mapping[str, Any] | None = None
+    puzzle_family: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -1621,8 +1623,10 @@ class TraceMemory:
                                           Counter[str]] = defaultdict(Counter)
         self.progress_actions: dict[str, list[ActionSpec]] = defaultdict(list)
         self.no_op_streak = 0
+        self.same_family_streak = 0
         self.probes_this_level = 0
         self.total_mental_eliminations = 0
+        self.spatial_visits: dict[tuple[int, int], int] = defaultdict(int)
 
     def reset_level(self) -> None:
         self.transitions.clear()
@@ -1630,7 +1634,9 @@ class TraceMemory:
         self.actions_by_state.clear()
         self.progress_actions.clear()
         self.no_op_streak = 0
+        self.same_family_streak = 0
         self.probes_this_level = 0
+        self.spatial_visits.clear()
 
     def reset_attempt(self) -> None:
         # Preserve learned transitions, state-action counts, global outcomes, and
@@ -1640,6 +1646,22 @@ class TraceMemory:
     def record(self, transition: Transition, was_probe: bool) -> None:
         self.transitions.append(transition)
         self.visits[transition.after_exact] += 1
+        
+        if transition.action.data:
+            data_dict = dict(transition.action.data)
+            x, y = data_dict.get("x"), data_dict.get("y")
+            if x is not None and y is not None:
+                self.spatial_visits[(x, y)] += 1
+        
+        # Track same family streak to detect boredom/collapse
+        if len(self.transitions) > 1 and transition.event.level_delta == 0:
+            last = self.transitions[-2]
+            if last.action.name == transition.action.name:
+                self.same_family_streak += 1
+            else:
+                self.same_family_streak = 0
+        else:
+            self.same_family_streak = 0
         self.actions_by_state[transition.before_exact][transition.action.key] += 1
         outcome = "progress" if transition.event.level_delta > 0 else (
             "death" if transition.event.game_over else (
@@ -1669,11 +1691,36 @@ class TraceMemory:
         total = sum(outcomes.values())
         return outcomes["noop"] / total if total else 0.0
 
-    def recent_state_loop(self, window: int) -> bool:
-        if len(self.transitions) < max(4, window // 2):
+    def recent_state_loop(self, window: int = 12) -> bool:
+        if len(self.transitions) < 4:
             return False
         recent = [t.after_exact for t in list(self.transitions)[-window:]]
         return len(set(recent)) <= max(2, len(recent) // 3)
+
+    def longest_family_streak(self) -> int:
+        if not self.transitions:
+            return 0
+        max_streak = 0
+        current_streak = 0
+        last_family = None
+        for t in self.transitions:
+            if t.action.name == last_family:
+                current_streak += 1
+            else:
+                max_streak = max(max_streak, current_streak)
+                current_streak = 1
+                last_family = t.action.name
+        return max(max_streak, current_streak)
+        
+    def action_family_entropy(self) -> float:
+        import math
+        if not self.transitions:
+            return 0.0
+        counts = {}
+        for t in self.transitions:
+            counts[t.action.name] = counts.get(t.action.name, 0) + 1
+        total = sum(counts.values())
+        return -sum((c/total) * math.log2(c/total) for c in counts.values())
 
     def find_replay_progress(self, exact_key: str) -> ActionSpec | None:
         candidates = self.progress_actions.get(exact_key)
@@ -2003,7 +2050,11 @@ class GoalHypothesisManager:
         self._value_cache: dict[str, float] = {}
         self.transitions_processed = 0
         self.top_goal_id = None
-        self.transitions_until_stabilized = 0
+        self.top_goal_changes_this_level = 0
+        self.prior_adjustments_this_level = 0
+        self.stabilized_before_progress = False
+        self.top_puzzle_family: str | None = None
+        self.puzzle_family_switch_counter = 0
 
     def reset_level(self, scene: Scene | None = None) -> None:
         self.hypotheses.clear()
@@ -2012,7 +2063,11 @@ class GoalHypothesisManager:
             scene.components)
         self.transitions_processed = 0
         self.top_goal_id = None
-        self.transitions_until_stabilized = 0
+        self.top_goal_changes_this_level = 0
+        self.prior_adjustments_this_level = 0
+        self.stabilized_before_progress = False
+        self.top_puzzle_family = None
+        self.puzzle_family_switch_counter = 0
         if scene is not None:
             self.seed(scene)
 
@@ -2051,21 +2106,27 @@ class GoalHypothesisManager:
     def adjust_priors(self, puzzle_family: str) -> None:
         """Dynamically reweight active goals based on an abducted puzzle family."""
         family = puzzle_family.lower().strip()
-        for goal in self.hypotheses.values():
-            if goal.status != "active":
-                continue
+        boost_occurred = False
+        for goal in self.active(limit=10):
             boost = 0.0
-            if family == "pathfinding" and goal.kind in ("reach_or_touch_color", "connect_colors"):
-                boost = 0.15
-            elif family == "color_matching" and goal.kind in ("collect_color", "match_patterns"):
-                boost = 0.15
-            elif family == "field_diffusion" and goal.kind in ("expand_region", "flood_fill"):
-                boost = 0.15
-            
+            if "pathfinding" in family and goal.kind in {"reach_or_touch_color", "move_controllable_to_target"}:
+                boost = 0.4
+            elif "geometric" in family and goal.kind in {"preserve_object_relationships", "cause_topology_change"}:
+                boost = 0.35
+            elif "field_diffusion" in family and goal.kind in {"collect_color", "cause_topology_change"}:
+                boost = 0.4
+            elif "color_matching" in family and goal.kind == "collect_color":
+                boost = 0.35
+            elif "object_interaction" in family and goal.kind in {"destroy_components", "move_controllable_to_target"}:
+                boost = 0.3
+                
             if boost > 0.0:
                 goal.confidence = min(0.95, goal.confidence + boost)
                 goal.source = f"llm_abduction_{family}"
                 self._value_cache.clear()
+                boost_occurred = True
+        if boost_occurred:
+            self.prior_adjustments_this_level += 1
 
     def _trim(self) -> None:
         if len(self.hypotheses) > self.config.max_goal_hypotheses:
@@ -2079,10 +2140,18 @@ class GoalHypothesisManager:
             
         active_goals = [g for g in self.hypotheses.values() if g.status == "active"]
         if active_goals:
-            current_top = max(active_goals, key=lambda g: g.confidence).goal_id
-            if current_top != self.top_goal_id:
-                self.top_goal_id = current_top
+            current_top = max(active_goals, key=lambda g: g.confidence)
+            if current_top.goal_id != self.top_goal_id:
+                if self.top_goal_id is not None:
+                    self.top_goal_changes_this_level += 1
+                self.top_goal_id = current_top.goal_id
                 self.transitions_until_stabilized = self.transitions_processed
+                
+            new_top_family = str(current_top.source).replace("llm_abduction_", "") if str(current_top.source).startswith("llm_abduction") else current_top.kind
+            if new_top_family != self.top_puzzle_family:
+                if self.top_puzzle_family is not None:
+                    self.puzzle_family_switch_counter += 1
+                self.top_puzzle_family = new_top_family
 
     def seed(self, scene: Scene) -> None:
         if self.level_start_grid is None:
@@ -2380,6 +2449,8 @@ class GoalHypothesisManager:
                 goal.status = "dormant"
 
         if event.level_delta > 0 or event.win:
+            if not self.stabilized_before_progress and self.transitions_processed > 0 and self.transitions_until_stabilized < self.transitions_processed:
+                self.stabilized_before_progress = True
             for goal in self.active(limit=3):
                 self.transfer_priors[(
                     goal.kind, self._param_key(goal.params))] += 1
@@ -3788,6 +3859,11 @@ class OptionalLocalReasoner:
         self.last_call_step = -10_000
         self.last_latency_sec = 0.0
         self.total_latency_sec = 0.0
+        self.abductions_parsed = 0
+        self.abductions_selected = 0
+        self.llm_action_progress = 0
+        self.llm_program_progress = 0
+        self.llm_abduction_prior_shift_progress = 0
         self._failed = False
         self._model = None
 
@@ -3804,6 +3880,11 @@ class OptionalLocalReasoner:
     def reset_level(self) -> None:
         self.calls_this_level = 0
         self.last_call_step = -10_000
+        self.abductions_parsed = 0
+        self.abductions_selected = 0
+        self.llm_action_progress = 0
+        self.llm_program_progress = 0
+        self.llm_abduction_prior_shift_progress = 0
 
     def _load(self) -> bool:
         if self._model is not None:
@@ -3946,7 +4027,7 @@ class OptionalLocalReasoner:
         programs_summary: Sequence[Mapping[str, Any]] = (),
         response_frames: Sequence[np.ndarray] = (),
         feedback: str = "",
-    ) -> list[ReasonerProposal] | None:
+    ) -> list[AbductionProposal] | None:
         if not self.can_call(step, milestone=True) or not self._load():
             return None
 
@@ -3968,19 +4049,20 @@ class OptionalLocalReasoner:
             for t in list(memory.transitions)[-8:]
         ]
         
-        feedback_str = f"PREVIOUS ATTEMPT FAILED: {feedback}\nPlease analyze the failure and propose 2 corrected hypotheses.\n" if feedback else ""
+        feedback_str = f"PREVIOUS ATTEMPT FAILED: {feedback}\nPlease analyze the failure and propose 2 corrected hypotheses.\n" if feedback else "MANDATORY: Since this is your first response for this step, you MUST use the `inspect` or `python` tool to explore the state. Do NOT guess an abduction yet.\n"
         
         prompt = (
             "You control an unknown ARC-AGI-3 environment. You may inspect the "
-            "current integer grid or execute Python scripts without spending an action, then return "
-            "up to 2 distinct legal actions or hypotheses. Emit ONE JSON object only per response.\n"
+            "grid, execute python to analyze the state, or output "
+            "an abductive explanation of recent transitions. Emit ONE JSON object only per response.\n"
             f"{feedback_str}"
             "Inspection schema: "
             '{"type":"inspect","expression":"state.find_color(3)"}\n'
-            "Python execution schema: "
+            "Python schema (for data analysis only): "
             '{"type":"python","code":"for t in recent_transitions: print(t[\'action\'])"}\n'
-            "Final schema (generate up to 2 diverse proposals!): "
-            '{"type":"action","proposals":[{"action":"ACTION1","x":null,"y":null,"confidence":0.9,"why":"..."}, {"action":"...","why":"..."}]}\n'
+            "Final schema (emit abductive hypotheses for observed transitions!): "
+            '{"type":"abduction","puzzle_family":"color_matching","suggested_programs":[{"kind":"color_map","action":"ACTION1","params":{"mapping":{"2":3}},"why":"..."}, {"action":"...","why":"..."}]}\n'
+            "CRITICAL: You MUST include the nested 'suggested_programs' array to propose a structural hypothesis!\n"
             "Allowed state methods: summary(), shape(), find_color(value), count(value), "
             "patch(x,y,radius), diff_last_frame(), changed_cells(), color_histogram(). "
             "Prefer stored evidence and reversible progress. Do not request a physical "
@@ -3992,10 +4074,10 @@ class OptionalLocalReasoner:
             f"recent_transitions={json.dumps(recent, separators=(',', ':'))}\n"
             f"candidate_goals={json.dumps(list(goals_summary), separators=(',', ':'), default=str)}\n"
             f"verified_programs={json.dumps(list(programs_summary), separators=(',', ':'), default=str)}\n"
-            "Examples of Optional Program Hypotheses (add inside proposal):\n"
-            "- Color map: \"program\":{\"kind\":\"color_map\",\"action\":\"ACTION1\",\"params\":{\"mapping\":{\"3\":4}}}\n"
-            "- Translation: \"program\":{\"kind\":\"translation\",\"action\":\"ACTION6\",\"params\":{\"dx\":1,\"dy\":0,\"selector_color\":3,\"background\":0}}\n"
-            "- Delete: \"program\":{\"kind\":\"component_delete\",\"action\":\"ACTION2\",\"params\":{\"background\":0,\"clicked_color\":-1}}\n"
+            "Examples of Optional Program Hypotheses (add inside suggested_programs):\n"
+            "- Color map: {\"kind\":\"color_map\",\"action\":\"ACTION1\",\"params\":{\"mapping\":{\"3\":4}}}\n"
+            "- Translation: {\"kind\":\"translation\",\"action\":\"ACTION6\",\"params\":{\"dx\":1,\"dy\":0,\"selector_color\":3,\"background\":0}}\n"
+            "- Delete: {\"kind\":\"component_delete\",\"action\":\"ACTION2\",\"params\":{\"background\":0,\"clicked_color\":-1}}\n"
             "A program is a highly valued hypothesis and will be replay-verified before use.\n"
         )
 
@@ -4057,41 +4139,46 @@ class OptionalLocalReasoner:
                         f"{str(exc)[:180]}\nReturn final action JSON now.\n"
                     )
                 continue
-            proposals_data = obj.get("proposals")
-            if not isinstance(proposals_data, list):
-                proposals_data = [obj]
-            
-            results: list[ReasonerProposal] = []
-            for prop in proposals_data:
-                if not isinstance(prop, dict):
-                    continue
-                name = str(prop.get("action", "")).upper()
-                if name not in legal_names:
-                    continue
-                data: tuple[tuple[str, int], ...] = ()
-                if prop.get("x") is not None or prop.get("y") is not None:
-                    if prop.get("x") is None or prop.get("y") is None:
+            if response_type == "abduction":
+                puzzle_family = obj.get("puzzle_family")
+                if isinstance(puzzle_family, str):
+                    puzzle_family = puzzle_family.strip()
+                proposals_data = obj.get("suggested_programs")
+                if not isinstance(proposals_data, list):
+                    proposals_data = []
+                
+                results: list[AbductionProposal] = []
+                for prop in proposals_data:
+                    if not isinstance(prop, dict):
                         continue
-                    x, y = int(prop["x"]), int(prop["y"])
-                    if not (0 <= x < scene.width and 0 <= y < scene.height):
+                    name = str(prop.get("action", "")).upper()
+                    if name not in legal_names:
                         continue
-                    data = (("x", x), ("y", y))
-                confidence = float(prop.get("confidence", 0.5))
-                action_spec = ActionSpec(
-                    name=name,
-                    data=data,
-                    source="milestone_model_repl",
-                    predicted_effect=str(prop.get("why", "model proposal"))[:160],
-                    score=2.0 + max(0.0, min(1.0, confidence)),
-                    goal_ids=tuple(str(x) for x in prop.get("goal_ids", [])[
-                                   :4]) if isinstance(prop.get("goal_ids"), list) else (),
-                )
-                program_spec = prop.get("program") if isinstance(
-                    prop.get("program"), dict) else None
-                results.append(ReasonerProposal(action_spec, program_spec))
-            
-            if results:
-                return results
+                    data: tuple[tuple[str, int], ...] = ()
+                    if prop.get("x") is not None or prop.get("y") is not None:
+                        if prop.get("x") is None or prop.get("y") is None:
+                            continue
+                        x, y = int(prop["x"]), int(prop["y"])
+                        if not (0 <= x < scene.width and 0 <= y < scene.height):
+                            continue
+                        data = (("x", x), ("y", y))
+                    confidence = float(prop.get("confidence", 0.5))
+                    action_spec = ActionSpec(
+                        name=name,
+                        data=data,
+                        source="milestone_model_repl",
+                        predicted_effect=str(prop.get("why", "model proposal"))[:160],
+                        score=2.0 + max(0.0, min(1.0, confidence)),
+                        goal_ids=tuple(str(x) for x in prop.get("goal_ids", [])[:4]) if isinstance(prop.get("goal_ids"), list) else (),
+                    )
+                    program_spec = prop if prop.get("kind") else None
+                    results.append(AbductionProposal(action_spec, program_spec, puzzle_family=puzzle_family if isinstance(puzzle_family, str) else None))
+                
+                if results or puzzle_family:
+                    if not results:
+                        results.append(AbductionProposal(None, puzzle_family=puzzle_family if isinstance(puzzle_family, str) else None))
+                    return results
+                return None
             return None
         return None
 
@@ -4827,20 +4914,55 @@ class MetacognitiveController:
 
         candidates = self.candidate_generator.generate(
             scene, legal_actions, use_hypotheses=profile.use_hypotheses)
+            
+        # 2b) Forced Structural Probe (Boredom Override)
+        if self.memory.same_family_streak >= 10:
+            dominant_family = self.memory.transitions[-1].action.name if self.memory.transitions else ""
+            probes = []
+            for candidate in candidates:
+                if candidate.spec.name == dominant_family:
+                    continue
+                prediction = self._predict(scene, candidate.spec, profile)
+                decision = self._verify(scene, candidate.spec, legal_names, prediction, True, profile)
+                if not decision.allowed:
+                    continue
+                rarity = -self.memory.global_action_outcomes[candidate.spec.name].total()
+                # Prioritize spatial regions with low visit counts
+                spatial_penalty = 0
+                if candidate.spec.data:
+                    data_dict = dict(candidate.spec.data)
+                    x, y = data_dict.get("x"), data_dict.get("y")
+                    if x is not None and y is not None:
+                        # True spatial rarity: penalize heavily visited locations.
+                        visits = self.memory.spatial_visits.get((x, y), 0)
+                        if visits == 0:
+                            rarity += 5.0  # Massive boost for completely unvisited coordinates
+                        else:
+                            rarity -= visits
+                        if candidate.spec.name == "ACTION6":
+                            rarity += 1.0 # Boost ACTION6 if it's not the dominant family
+                probes.append((rarity, candidate, decision))
+            
+            if probes:
+                probes.sort(key=lambda row: row[0], reverse=True)
+                score, best, decision = probes[0]
+                spec = ActionSpec(
+                    name=best.spec.name, data=best.spec.data, source="forced_structural_probe",
+                    predicted_effect=best.spec.predicted_effect, score=score, goal_ids=decision.goal_ids
+                )
+                self.memory.same_family_streak = 0
+                return spec, True, {"stage": "forced_structural_probe", "score": round(score, 3)}
 
         # 3) A9-only bounded counterfactual planning with anti-hijack grounding.
         is_looping = self.memory.recent_state_loop(self.config.loop_window)
         cf_plan = self.counterfactual.plan(
             scene, candidates, legal_names) if profile.use_counterfactual else None
         if cf_plan is not None:
-            if self.counterfactual_streak >= 3 and (self.memory.no_op_streak > 0 or is_looping):
-                cf_plan = None
-                self.counterfactual_streak = 0
-            else:
+            if cf_plan.prediction is not None and cf_plan.first_action is not None and (self.counterfactual_streak < 15 or profile.use_programs):
                 self.counterfactual_streak += 1
                 self.plan_queue.extend(cf_plan.remaining)
                 return cf_plan.first_action, False, {
-                    "stage": "counterfactual_program_search",
+                    "stage": "counterfactual_program_search" if profile.use_programs and not self.dead.is_dead("counterfactual_program_search") and self.counterfactual_streak < 15 else "counterfactual_fallback",
                     "program": cf_plan.prediction.program_id,
                     "program_kind": cf_plan.prediction.kind,
                     "alignment": round(cf_plan.alignment.score, 3),
@@ -4871,7 +4993,10 @@ class MetacognitiveController:
                         prediction.grid.tobytes()),
                     goal_ids=decision.goal_ids,
                 )
+                self.counterfactual_streak += 1
                 return spec, prediction is None, {"stage": "path_planner", "alignment": round(decision.score, 3)}
+            else:
+                self.counterfactual_streak = 0
 
         # 5) Replay/hash/hypothesis arbitration remains the A5 safety core.
         ranked: list[tuple[float, Candidate,
@@ -4925,7 +5050,10 @@ class MetacognitiveController:
                     failed_summaries = []
                     
                     for proposal in proposals:
+                        if proposal.puzzle_family is not None:
+                            self.goals.adjust_priors(proposal.puzzle_family)
                         if proposal.program_spec is not None and profile.use_programs:
+                            self.reasoner.abductions_parsed += 1
                             self.programs.ingest_model_program(
                                 proposal.program_spec, list(self.memory.transitions))
                         
@@ -5368,6 +5496,21 @@ class MyAgent(Agent):
             sequence.settled, observed_level, self.pending_action)
         event = self._record_pending_transition(
             scene, latest_frame, previous_level, sequence, animation)
+            
+        if event is not None and (event.level_delta > 0 or event.win):
+            if self.pending_action is not None:
+                if str(self.pending_action.source).startswith("milestone_model"):
+                    self.reasoner.llm_action_progress += 1
+                elif self.pending_action.program_id is not None:
+                    prog = self.programs.programs.get(self.pending_action.program_id)
+                    if prog is not None and str(prog.source).startswith("llm_abduction"):
+                        self.reasoner.llm_program_progress += 1
+                        
+            active_goals = [g for g in self.goals.hypotheses.values() if g.status == "active"]
+            if active_goals:
+                current_top = max(active_goals, key=lambda g: g.confidence)
+                if str(current_top.source).startswith("llm_abduction"):
+                    self.reasoner.llm_abduction_prior_shift_progress += 1
 
         if level_changed:
             self._level_reset(observed_level, first_scene=None,
@@ -5475,6 +5618,21 @@ class MyAgent(Agent):
             "runtime_game_p95_sec": self.runtime.measured_game_p95_sec(),
             "model_calls_this_level": self.reasoner.calls_this_level,
             "model_latency_last_sec": round(self.reasoner.last_latency_sec, 4),
+            "same_family_streak": self.memory.same_family_streak,
+            "counterfactual_streak": self.controller.counterfactual_streak,
+            "transitions_until_stabilized": self.goals.transitions_until_stabilized,
+            "top_goal_changes_this_level": self.goals.top_goal_changes_this_level,
+            "prior_adjustments_this_level": self.goals.prior_adjustments_this_level,
+            "stabilized_before_progress": self.goals.stabilized_before_progress,
+            "puzzle_family_switch_counter": self.goals.puzzle_family_switch_counter,
+            "churn_score": round((self.goals.top_goal_changes_this_level + self.goals.puzzle_family_switch_counter) / max(1, self.goals.transitions_processed), 3),
+            "action_family_entropy": round(self.memory.action_family_entropy(), 3),
+            "longest_family_streak": self.memory.longest_family_streak(),
+            "llm_abductions_parsed": self.reasoner.abductions_parsed,
+            "llm_abductions_selected": self.reasoner.abductions_selected,
+            "llm_action_progress": self.reasoner.llm_action_progress,
+            "llm_program_progress": self.reasoner.llm_program_progress,
+            "llm_abduction_prior_shift_progress": self.reasoner.llm_abduction_prior_shift_progress,
         }
         if event is not None:
             reasoning["previous_event"] = {
@@ -5491,4 +5649,10 @@ class MyAgent(Agent):
         self.pending_reasoning = dict(reasoning)
         self.pending_decision_latency_sec = max(
             0.0, time.monotonic() - decision_started)
+            
+        if spec.program_id is not None:
+            prog = self.programs.programs.get(spec.program_id)
+            if prog is not None and str(prog.source).startswith("llm_abduction"):
+                self.reasoner.abductions_selected += 1
+                
         return self._to_game_action(spec, legal_actions, reasoning)
