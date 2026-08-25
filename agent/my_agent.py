@@ -131,7 +131,7 @@ class Config:
 
     # Kaggle Offline GGUF path fallback
     model_path: str = os.getenv(
-        "DEWMA_MODEL_PATH", "/kaggle/input/gemma4-e4b-gguf/gemma4-e4b.gguf").strip()
+        "DEWMA_MODEL_PATH", "/kaggle/input/qwen25-coder-7b-gguf/qwen2.5-coder-7b-instruct-q4_k_m.gguf").strip()
     model_call_budget: int = _env_int("DEWMA_MODEL_CALL_BUDGET", 12)
     model_cooldown_steps: int = _env_int("DEWMA_MODEL_COOLDOWN", 3)
     model_max_new_tokens: int = _env_int("DEWMA_MODEL_MAX_NEW_TOKENS", 256)
@@ -3759,21 +3759,22 @@ class OptionalLocalReasoner:
         # Ping local Ollama server and auto-detect active model tag
         import urllib.request
         import json
-        try:
-            req = urllib.request.Request("http://127.0.0.1:11434/api/tags", method="GET")
-            with urllib.request.urlopen(req, timeout=3) as resp:
-                if resp.status == 200:
-                    data = json.loads(resp.read().decode('utf-8'))
-                    models = data.get("models", [])
-                    if models:
-                        self.detected_tag = models[0].get("name")
-                    else:
-                        self.detected_tag = os.environ.get("DEWMA_MODEL_TAG", "qwen2.5-coder:7b")
-                    self._model = "ollama"
-                    return True
-        except Exception:
-            pass
-
+        import time
+        for _ in range(5):
+            try:
+                req = urllib.request.Request("http://127.0.0.1:11434/api/tags", method="GET")
+                with urllib.request.urlopen(req, timeout=5) as resp:
+                    if resp.status == 200:
+                        data = json.loads(resp.read().decode('utf-8'))
+                        models = data.get("models", [])
+                        if models:
+                            self.detected_tag = models[0].get("name")
+                        else:
+                            self.detected_tag = os.environ.get("DEWMA_MODEL_TAG", "qwen2.5-coder:7b")
+                        self._model = "ollama"
+                        return True
+            except Exception:
+                time.sleep(2)
         # Try in-process llama_cpp loader if model_path file exists
         model_path = self.config.model_path
         if model_path and os.path.exists(model_path):
@@ -3860,7 +3861,7 @@ class OptionalLocalReasoner:
                     headers={'Content-Type': 'application/json'},
                     method="POST"
                 )
-                with urllib.request.urlopen(req, timeout=30) as resp:
+                with urllib.request.urlopen(req, timeout=120) as resp:
                     result = json.loads(resp.read().decode('utf-8'))
                     text = result.get("response", "").strip()
                 print(f"[Ollama LLM Call #{self.calls}] Tag: {getattr(self, 'detected_tag', 'unknown')} | Latency: {time.monotonic()-started:.2f}s | Output: {text[:80]}...", file=sys.stderr)
