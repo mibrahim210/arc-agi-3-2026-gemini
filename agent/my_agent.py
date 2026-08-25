@@ -169,6 +169,11 @@ class Config:
     control_group_max_gap: int = _env_int("DEWMA_CONTROL_GROUP_MAX_GAP", 6)
     control_group_membership_overlap: float = _env_float(
         "DEWMA_CONTROL_GROUP_MEMBERSHIP_OVERLAP", 0.60)
+    control_applicability_min_observations: int = _env_int(
+        "DEWMA_CONTROL_APPLICABILITY_MIN_OBSERVATIONS", 3)
+    control_complex_action_ratio: float = _env_float(
+        "DEWMA_CONTROL_COMPLEX_ACTION_RATIO", 0.75)
+
 
     enable_learned_passability: bool = _env_bool(
         "DEWMA_LEARNED_PASSABILITY", True)
