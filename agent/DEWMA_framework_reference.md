@@ -6,22 +6,6 @@ This file is the single source of truth for the current **DEWMA** framework as i
 
 It replaces the need to keep multiple theory notes in sync. When `my_agent.py` changes meaningfully, update this file so the conceptual framework, runtime behavior, and implementation details stay aligned.
 
-### 4.12 Puzzle-Family Classification and Goal Priors
-
-The agent features a deterministic, soft classify_puzzle_family function that evaluates grid density and connected components to infer priors (e.g., geometric_transformation, pathfinding). These priors are dynamically updated via LLM abductive hypotheses through GoalHypothesisManager.adjust_priors(), which boosts goal confidence without hard-routing.
-
-### 4.13 Boredom and Anti-Collapse
-
-To prevent action-family collapse, MetacognitiveController monitors same_family_streak. When the streak exceeds a threshold, it triggers a **Forced Structural Probe**, which explicitly filters out dominant action families and prefers spatial regions with lower historical interaction counts to safely guarantee broader exploration.
-
-### 4.14 Convergence and Trace Diagnostics
-
-To rigorously monitor agent behavior, telemetry logs capture rich, Kaggle-safe metrics:
-- **Action-Family Metrics**: ction_family_entropy, longest_family_streak, same_family_streak
-- **Convergence**: 	ransitions_until_stabilized, 	op_goal_changes_this_level, prior_adjustments_this_level, stabilized_before_progress
-- **LLM Impact**: llm_abductions_parsed, llm_abductions_selected, llm_abductions_progress
-- **Counterfactuals**: counterfactual_streak
-
 ---
 
 ## 1. What DEWMA Means Here
@@ -147,6 +131,10 @@ This is a strong inductive bias, but it is not game-specific branching.
 - loop detection
 - no-op streaks
 - recent-state recurrence checks
+- same-family streak detection
+- action-family entropy estimation
+- longest action-family streak measurement
+- spatial visit counting for coordinate-based probing
 
 ### 4.4 Causal / Hypothesis Memory
 
@@ -189,6 +177,14 @@ Examples of goal families include:
 
 Goals are strengthened or weakened from actual transition evidence and level progress.
 
+The goal layer also tracks convergence-oriented diagnostics such as:
+
+- top-goal identity changes within a level
+- transitions until the top goal stabilizes
+- whether stabilization occurred before progress
+- puzzle-family switch count
+- prior-adjustment count from abductive hints
+
 ### 4.7 Executable Program Library
 
 The current world-model program layer induces, verifies, and reuses explicit transformation programs.
@@ -204,6 +200,12 @@ Supported program families currently include:
 - `flip_h`
 - `flip_v`
 - `line_connect`
+- `drag_component`
+- `gravity`
+- `flood_fill`
+- `copy_pattern`
+- `conditional_recolor`
+- `count_and_fill`
 
 Programs are only trusted for generalized planning once they accumulate sufficient replay support and verification quality.
 
@@ -245,7 +247,7 @@ and it is throttled when looping behavior appears.
 
 ### 4.11 Optional Local Reasoner
 
-The local text reasoner acts as an **abductive hypothesis generator**, producing both structural program priors and puzzle-family classifications based on observed transitions, rather than blindly selecting actions.
+The local text reasoner acts as an **abductive hypothesis generator**, producing structural program priors, action candidates, and puzzle-family classifications from observed transitions rather than serving as an unconstrained direct policy.
 
 Current backend strategy:
 
@@ -274,19 +276,51 @@ Its proposals are still subject to:
 
 ### 4.12 Puzzle-Family Classification and Goal Priors
 
-The agent features a deterministic, soft classify_puzzle_family function that evaluates grid density and connected components to infer priors (e.g., geometric_transformation, pathfinding). These priors are dynamically updated via LLM abductive hypotheses through GoalHypothesisManager.adjust_priors(), which boosts goal confidence without hard-routing.
+The agent includes a deterministic soft `classify_puzzle_family()` pass over grid density, color diversity, and connected-component structure to initialize high-level priors such as:
+
+- `pathfinding`
+- `color_matching`
+- `field_diffusion`
+- `geometric_transformation`
+
+These priors are then updated by LLM abductive proposals through `GoalHypothesisManager.adjust_priors()`, which boosts compatible goal families without hard-routing into game-specific logic.
 
 ### 4.13 Boredom and Anti-Collapse
 
-To prevent action-family collapse, MetacognitiveController monitors same_family_streak. When the streak exceeds a threshold, it triggers a **Forced Structural Probe**, which explicitly filters out dominant action families and prefers spatial regions with lower historical interaction counts to safely guarantee broader exploration.
+To prevent action-family collapse, `MetacognitiveController` monitors `same_family_streak`.
+
+When the streak exceeds a threshold, it triggers a **Forced Structural Probe** that:
+
+- filters out the current dominant action family
+- scores candidates by underexplored action usage
+- prefers less-visited coordinate regions through `TraceMemory.spatial_visits`
+- gives extra exploratory preference to novel `ACTION6` interactions when legal
+
+This is intended to broaden exploration without breaking the alignment gate.
 
 ### 4.14 Convergence and Trace Diagnostics
 
-To rigorously monitor agent behavior, telemetry logs capture rich, Kaggle-safe metrics:
-- **Action-Family Metrics**: ction_family_entropy, longest_family_streak, same_family_streak
-- **Convergence**: 	ransitions_until_stabilized, 	op_goal_changes_this_level, prior_adjustments_this_level, stabilized_before_progress
-- **LLM Impact**: llm_abductions_parsed, llm_abductions_selected, llm_abductions_progress
-- **Counterfactuals**: counterfactual_streak
+Telemetry logs capture rich, Kaggle-safe metrics including:
+
+- action-family metrics:
+  - `action_family_entropy`
+  - `longest_family_streak`
+  - `same_family_streak`
+- convergence metrics:
+  - `transitions_until_stabilized`
+  - `top_goal_changes_this_level`
+  - `prior_adjustments_this_level`
+  - `stabilized_before_progress`
+  - `puzzle_family_switch_counter`
+  - `churn_score`
+- LLM impact metrics:
+  - `llm_abductions_parsed`
+  - `llm_abductions_selected`
+  - `llm_action_progress`
+  - `llm_program_progress`
+  - `llm_abduction_prior_shift_progress`
+- counterfactual metrics:
+  - `counterfactual_streak`
 
 ---
 
@@ -311,12 +345,13 @@ The metacognitive controller currently follows this high-level priority order:
 
 1. exact replay progress or replay graph plan
 2. verified multi-step plan queue
-3. bounded counterfactual planning with verified programs
-4. deterministic path planning
-5. replay/hash/hypothesis arbitration
-6. milestone-gated local reasoner
-7. physical information-seeking probes
-8. alignment-constrained fallback
+3. forced structural probe during action-family collapse
+4. bounded counterfactual planning with verified programs
+5. deterministic path planning
+6. replay/hash/hypothesis arbitration
+7. milestone-gated local reasoner
+8. physical information-seeking probes
+9. alignment-constrained fallback
 
 This order is important: cheap, safe, and verified mechanisms outrank expensive speculative ones.
 
@@ -356,6 +391,8 @@ These capture:
 - decision stages
 - representation confidence
 - runtime tier
+- convergence counters
+- LLM contribution counters
 
 ### 8.2 LLM Forensics
 
@@ -410,6 +447,7 @@ So the current system is best described as:
 - Explicit developmental learning loop
 - Multiple interacting world-model layers
 - Verified-program planning rather than blind speculation
+- Better anti-collapse probing through spatial visit tracking
 - Good runtime-awareness for Kaggle conditions
 - Separate forensic logging for policy and model behavior
 
@@ -418,8 +456,8 @@ So the current system is best described as:
 ## 11. Current Weaknesses
 
 - The program vocabulary is still limited relative to the full novelty space of ARC-AGI-3
-- The agent can overcommit to the wrong abstraction family
-- Action-family collapse can still occur, especially around repeated `ACTION6`
+- The agent can still overcommit to the wrong abstraction family
+- Action-family collapse is mitigated, not eliminated
 - LLM proposals are often syntactically valid but semantically unverifiable
 - Tool-use by the local reasoner may still be underexploited
 
@@ -436,6 +474,8 @@ When `agent/my_agent.py` changes meaningfully, update this file if any of the fo
 - model budget / timeout / skip rules
 - trace or forensic log paths
 - major goal or alignment semantics
+- convergence metrics
+- LLM contribution metrics
 - overall DEWMA philosophical framing
 
 If only one documentation file is maintained going forward, maintain this one.

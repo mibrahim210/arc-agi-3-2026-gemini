@@ -169,10 +169,6 @@ class Config:
     control_group_max_gap: int = _env_int("DEWMA_CONTROL_GROUP_MAX_GAP", 6)
     control_group_membership_overlap: float = _env_float(
         "DEWMA_CONTROL_GROUP_MEMBERSHIP_OVERLAP", 0.60)
-    control_applicability_min_observations: int = _env_int(
-        "DEWMA_CONTROL_APPLICABILITY_MIN_OBSERVATIONS", 3)
-    control_complex_action_ratio: float = _env_float(
-        "DEWMA_CONTROL_COMPLEX_ACTION_RATIO", 0.75)
 
     enable_learned_passability: bool = _env_bool(
         "DEWMA_LEARNED_PASSABILITY", True)
@@ -186,28 +182,6 @@ class Config:
     path_max_target_goal_anchors: int = _env_int(
         "DEWMA_PATH_MAX_TARGET_GOAL_ANCHORS", 512)
 
-    enable_a8_virtual_first: bool = _env_bool("DEWMA_A8_VIRTUAL_FIRST", True)
-    enable_a8_bootstrap_protection: bool = _env_bool(
-        "DEWMA_A8_BOOTSTRAP_PROTECTION", False)
-    a8_bootstrap_min_cardinal_vectors: int = _env_int(
-        "DEWMA_A8_BOOTSTRAP_MIN_CARDINAL_VECTORS", 2)
-    a8_bootstrap_min_distinct_simple_actions: int = _env_int(
-        "DEWMA_A8_BOOTSTRAP_MIN_DISTINCT_SIMPLE_ACTIONS", 4)
-    a8_max_candidates_per_decision: int = _env_int(
-        "DEWMA_A8_MAX_CANDIDATES_PER_DECISION", 16)
-    a8_min_support: int = _env_int("DEWMA_A8_MIN_SUPPORT", 2)
-    a8_reject_confidence: float = _env_float(
-        "DEWMA_A8_REJECT_CONFIDENCE", 0.90)
-    a8_prefer_confidence: float = _env_float(
-        "DEWMA_A8_PREFER_CONFIDENCE", 0.65)
-    a8_min_useful_utility: float = _env_float(
-        "DEWMA_A8_MIN_USEFUL_UTILITY", 0.15)
-    a8_max_hypotheses_per_candidate: int = _env_int(
-        "DEWMA_A8_MAX_HYPOTHESES", 6)
-    a8_defer_predicted_noop: bool = _env_bool(
-        "DEWMA_A8_DEFER_PREDICTED_NOOP", True)
-    a8_defer_predicted_death: bool = _env_bool(
-        "DEWMA_A8_DEFER_PREDICTED_DEATH", True)
 
     enable_goal_inference: bool = _env_bool("DEWMA_GOALS", True)
     enable_programs: bool = _env_bool("DEWMA_PROGRAMS", True)
@@ -252,8 +226,7 @@ class Config:
         "DEWMA_FRONTIER_TRIGGER_NOOPS", 2)
     program_replay_window: int = _env_int("DEWMA_PROGRAM_REPLAY_WINDOW", 16)
     program_verify_limit: int = _env_int("DEWMA_PROGRAM_VERIFY_LIMIT", 64)
-    program_cellular_induction_interval: int = _env_int(
-        "DEWMA_PROGRAM_CELLULAR_INTERVAL", 4)
+
 
     trace_enabled: bool = _env_bool("DEWMA_TRACE_ENABLED", True)
     trace_to_disk: bool = _env_bool("DEWMA_TRACE_TO_DISK", True)
@@ -2843,6 +2816,21 @@ class ExecutableProgramLibrary:
                         },
                     )
                 )
+                if entity.entity_id == before.controlled_entity_id:
+                    candidates.append(
+                        self._make("drag_component", action.name, {"dx": int(dx), "dy": int(dy)})
+                    )
+
+        # gravity
+        moves = transition.event.entity_moves
+        if len(moves) > 0:
+            dirs = set((dx, dy) for _, dx, dy in moves if (dx or dy))
+            if len(dirs) == 1:
+                dx, dy = list(dirs)[0]
+                if (dx == 0 and dy != 0) or (dy == 0 and dx != 0):
+                    moved_eids = set(eid for eid, mdx, mdy in moves if (mdx or mdy))
+                    if len(moved_eids) > 1 or (len(moved_eids) == 1 and list(moved_eids)[0] != before.controlled_entity_id):
+                        candidates.append(self._make("gravity", action.name, {"dx": int(np.sign(dx)), "dy": int(np.sign(dy))}))
 
         # Rotations and Symmetry Flips
         if after.grid.shape == before.grid.shape:
@@ -2868,6 +2856,89 @@ class ExecutableProgramLibrary:
         if mapping_valid and mapping and len(mapping) <= 4:
             candidates.append(self._make(
                 "color_map", action.name, {"mapping": mapping}))
+
+        if len(changed[0]) > 0:
+            ys, xs = changed
+            if mapping_valid:
+                # line_connect
+                if len(xs) > 1:
+                    is_horiz = len(set(ys)) == 1
+                    is_vert = len(set(xs)) == 1
+                    if is_horiz or is_vert:
+                        if is_horiz:
+                            if np.max(xs) - np.min(xs) + 1 == len(xs):
+                                y = ys[0]
+                                min_x, max_x = np.min(xs), np.max(xs)
+                                left_bound = min_x == 0 or before.grid[y, min_x - 1] != before.background
+                                right_bound = max_x == before.width - 1 or before.grid[y, max_x + 1] != before.background
+                                if left_bound and right_bound:
+                                    candidates.append(self._make("line_connect", action.name, {"color": int(after.grid[ys[0], xs[0]]), "direction": "horizontal"}))
+                        elif is_vert:
+                            if np.max(ys) - np.min(ys) + 1 == len(ys):
+                                x = xs[0]
+                                min_y, max_y = np.min(ys), np.max(ys)
+                                top_bound = min_y == 0 or before.grid[min_y - 1, x] != before.background
+                                bottom_bound = max_y == before.height - 1 or before.grid[max_y + 1, x] != before.background
+                                if top_bound and bottom_bound:
+                                    candidates.append(self._make("line_connect", action.name, {"color": int(after.grid[ys[0], xs[0]]), "direction": "vertical"}))
+
+                # copy_pattern
+                if len(xs) > 1:
+                    min_x, min_y = np.min(xs), np.min(ys)
+                    new_shape = set((x - min_x, y - min_y) for x, y in zip(xs, ys))
+                    for e in before.entities:
+                        if len(e.cells) == len(new_shape):
+                            e_min_x = min(c[0] for c in e.cells)
+                            e_min_y = min(c[1] for c in e.cells)
+                            e_shape = set((c[0] - e_min_x, c[1] - e_min_y) for c in e.cells)
+                            if new_shape == e_shape:
+                                color_match = True
+                                for (nx, ny) in new_shape:
+                                    if after.grid[min_y + ny, min_x + nx] != before.grid[e_min_y + ny, e_min_x + nx]:
+                                        color_match = False
+                                        break
+                                if color_match:
+                                    candidates.append(self._make("copy_pattern", action.name, {"source_entity_id": e.entity_id}))
+                                    break
+
+                # count_and_fill
+                count = len(xs)
+                for e in before.entities:
+                    if len(e.cells) == count:
+                        min_x, max_x = np.min(xs), np.max(xs)
+                        min_y, max_y = np.min(ys), np.max(ys)
+                        if (max_x - min_x + 1) * (max_y - min_y + 1) == count:
+                            candidates.append(self._make("count_and_fill", action.name, {"count": count, "target_color": int(after.grid[ys[0], xs[0]])}))
+                            break
+            
+            # conditional_recolor
+            if not mapping_valid:
+                target_colors = set(after.grid[changed])
+                if len(target_colors) == 1:
+                    target_c = list(target_colors)[0]
+                    if target_c not in set(before.grid[changed]):
+                        candidates.append(self._make("conditional_recolor", action.name, {"target_color": int(target_c)}))
+                    
+        data = action.data_dict
+        if "x" in data and "y" in data and len(changed[0]) > 1:
+            cx, cy = int(data["x"]), int(data["y"])
+            if 0 <= cx < after.width and 0 <= cy < after.height:
+                if after.grid[cy, cx] != before.grid[cy, cx]:
+                    target_color = after.grid[cy, cx]
+                    if np.all(after.grid[changed] == target_color):
+                        changed_set = set(zip(changed[1], changed[0]))
+                        if (cx, cy) in changed_set:
+                            q = [(cx, cy)]
+                            visited = {(cx, cy)}
+                            while q:
+                                curr_x, curr_y = q.pop(0)
+                                for dx, dy in ((1,0), (-1,0), (0,1), (0,-1)):
+                                    nx, ny = curr_x + dx, curr_y + dy
+                                    if (nx, ny) in changed_set and (nx, ny) not in visited:
+                                        visited.add((nx, ny))
+                                        q.append((nx, ny))
+                            if len(visited) == len(changed_set):
+                                candidates.append(self._make("flood_fill", action.name, {"x": cx, "y": cy, "target_color": int(target_color)}))
 
         data = action.data_dict
         if "x" in data and "y" in data and 0 <= data["x"] < before.width and 0 <= data["y"] < before.height:
@@ -3093,8 +3164,9 @@ class ExecutableProgramLibrary:
             params = dict(spec.get("params", {}))
         except Exception:
             return None
-        allowed = {"translation", "color_map",
-                   "component_delete", "component_recolor"}
+        allowed = {"translation", "color_map", "component_delete", "component_recolor",
+                   "line_connect", "drag_component", "gravity", "flood_fill",
+                   "copy_pattern", "conditional_recolor", "count_and_fill"}
         if kind not in allowed or not action.startswith("ACTION"):
             return None
         payload: dict[str, Any]
@@ -3107,14 +3179,27 @@ class ExecutableProgramLibrary:
                     "background": int(params.get("background", 0)),
                 }
             elif kind == "color_map":
-                payload = {"mapping": {int(k): int(
-                    v) for k, v in dict(params["mapping"]).items()}}
+                payload = {"mapping": {int(k): int(v) for k, v in dict(params["mapping"]).items()}}
             elif kind == "component_delete":
-                payload = {"background": int(params.get("background", 0)), "clicked_color": int(
-                    params.get("clicked_color", -1))}
+                payload = {"background": int(params.get("background", 0)), "clicked_color": int(params.get("clicked_color", -1))}
+            elif kind == "component_recolor":
+                payload = {"target_color": int(params["target_color"]), "background": int(params.get("background", 0)), "clicked_color": int(params.get("clicked_color", -1))}
+            elif kind == "line_connect":
+                payload = {"color": int(params["color"]), "direction": str(params["direction"])}
+            elif kind == "drag_component":
+                payload = {"dx": int(params["dx"]), "dy": int(params["dy"])}
+            elif kind == "gravity":
+                payload = {"dx": int(params["dx"]), "dy": int(params["dy"])}
+            elif kind == "flood_fill":
+                payload = {"x": int(params["x"]), "y": int(params["y"]), "target_color": int(params["target_color"])}
+            elif kind == "copy_pattern":
+                payload = {"source_entity_id": str(params["source_entity_id"])}
+            elif kind == "conditional_recolor":
+                payload = {"target_color": int(params["target_color"])}
+            elif kind == "count_and_fill":
+                payload = {"count": int(params["count"]), "target_color": int(params["target_color"])}
             else:
-                payload = {"target_color": int(params["target_color"]), "background": int(
-                    params.get("background", 0)), "clicked_color": int(params.get("clicked_color", -1))}
+                return None
         except Exception:
             return None
         self._prediction_cache.clear()
@@ -3392,20 +3477,81 @@ class ControlledAssembly:
 
 
 class ControlInference:
+    def __init__(self, config: Config) -> None:
+        self.config = config
+        self.recent_moves: list[tuple[tuple[str, int, int], ...]] = []
+
+    def record(self, transition: Transition) -> None:
+        if transition.event.entity_moves:
+            self.recent_moves.append(transition.event.entity_moves)
+            if len(self.recent_moves) > self.config.control_group_max_gap + 2:
+                self.recent_moves.pop(0)
+
     def controlled_assembly(self, scene: Scene) -> ControlledAssembly | None:
-        if scene.controlled_entity_id:
-            e = next((x for x in scene.entities if x.entity_id ==
-                     scene.controlled_entity_id), None)
-            if e:
-                return ControlledAssembly(
-                    centroid=e.centroid,
-                    cells=e.cells,
-                    bbox=e.bbox,
-                    member_entity_ids=(e.entity_id,),
-                    representative_entity_id=e.entity_id,
-                    confidence=1.0,
-                )
-        return None
+        if not scene.controlled_entity_id:
+            return None
+        
+        controlled_e = next((x for x in scene.entities if x.entity_id == scene.controlled_entity_id), None)
+        if not controlled_e:
+            return None
+            
+        co_movers = {scene.controlled_entity_id}
+        joint_moves = 0
+        total_moves = 0
+        
+        if self.config.enable_control_groups and self.recent_moves:
+            for move_set in self.recent_moves:
+                ctrl_move = next(( (dx, dy) for eid, dx, dy in move_set if eid == scene.controlled_entity_id ), None)
+                if ctrl_move is not None:
+                    total_moves += 1
+                    cdx, cdy = ctrl_move
+                    matching = {eid for eid, dx, dy in move_set if dx == cdx and dy == cdy}
+                    if len(co_movers) == 1:
+                        co_movers.update(matching)
+                    else:
+                        overlap = co_movers.intersection(matching)
+                        if len(overlap) / len(co_movers) >= self.config.control_group_membership_overlap:
+                            co_movers = overlap
+                        else:
+                            co_movers.intersection_update(matching)
+                    if len(co_movers) > 1:
+                        joint_moves += 1
+        
+        if len(co_movers) >= self.config.control_group_min_members and len(co_movers) <= self.config.control_group_max_members:
+            confidence = joint_moves / max(1, total_moves)
+            if joint_moves >= self.config.control_group_min_support and confidence >= self.config.control_group_min_confidence:
+                cells = []
+                for eid in co_movers:
+                    e = next((x for x in scene.entities if x.entity_id == eid), None)
+                    if e:
+                        cells.extend(e.cells)
+                if cells:
+                    cells = list(set(cells))
+                    xs = [c[0] for c in cells]
+                    ys = [c[1] for c in cells]
+                    cx = sum(xs) // len(xs)
+                    cy = sum(ys) // len(ys)
+                    bbox = (min(xs), min(ys), max(xs) - min(xs) + 1, max(ys) - min(ys) + 1)
+                    bbox_area = bbox[2] * bbox[3]
+                    spatial_coherence = len(cells) / max(1, bbox_area)
+                    if spatial_coherence >= self.config.control_group_min_spatial_coherence:
+                        return ControlledAssembly(
+                            centroid=(cx, cy),
+                            cells=tuple(cells),
+                            bbox=bbox,
+                            member_entity_ids=tuple(sorted(list(co_movers))),
+                            representative_entity_id=scene.controlled_entity_id,
+                            confidence=confidence,
+                        )
+                
+        return ControlledAssembly(
+            centroid=controlled_e.centroid,
+            cells=controlled_e.cells,
+            bbox=controlled_e.bbox,
+            member_entity_ids=(controlled_e.entity_id,),
+            representative_entity_id=controlled_e.entity_id,
+            confidence=1.0,
+        )
 
     def diagnostics(self, scene: Scene) -> dict[str, Any]:
         return {
@@ -3415,15 +3561,54 @@ class ControlInference:
 
 
 class TerrainPassabilityModel:
+    def __init__(self, config: Config) -> None:
+        self.config = config
+        self.successes: Counter[int] = Counter()
+        self.failures: Counter[int] = Counter()
+
     def passable_colors(self, scene: Scene) -> set[int]:
-        return {scene.background}
+        colors = {scene.background}
+        for color, success_count in self.successes.items():
+            failure_count = self.failures[color]
+            total = success_count + failure_count * self.config.passability_failure_penalty
+            if total > 0:
+                confidence = success_count / total
+                if success_count >= self.config.passability_min_support and confidence >= self.config.passability_min_confidence:
+                    colors.add(color)
+        for color, failure_count in self.failures.items():
+            success_count = self.successes.get(color, 0)
+            total = success_count + failure_count * self.config.passability_failure_penalty
+            if total > 0:
+                failure_confidence = (failure_count * self.config.passability_failure_penalty) / total
+                if failure_count >= self.config.passability_min_support and failure_confidence >= self.config.passability_min_confidence:
+                    colors.discard(color)
+        return colors
 
     def passability_mask(self, scene: Scene) -> np.ndarray:
-        return scene.grid == scene.background
+        colors = list(self.passable_colors(scene))
+        mask = np.isin(scene.grid, colors)
+        return mask
+
+    def record(self, transition: Transition, scene: Scene) -> None:
+        action = transition.action
+        event = transition.event
+        if action.name.startswith("ACTION"):
+            data = action.data_dict
+            if "x" in data and "y" in data:
+                x, y = int(data["x"]), int(data["y"])
+                if 0 <= x < scene.width and 0 <= y < scene.height:
+                    target_color = int(scene.grid[y, x])
+                    if target_color != scene.background:
+                        if event.no_op:
+                            self.failures[target_color] += 1
+                        elif event.changed_count > 0:
+                            self.successes[target_color] += 1
 
     def diagnostics(self, scene: Scene) -> dict[str, Any]:
         return {
             "passable_colors": list(self.passable_colors(scene)),
+            "successes": dict(self.successes),
+            "failures": dict(self.failures),
         }
 
 
@@ -3433,9 +3618,9 @@ class PathPlanner:
 
     def __init__(self, config: Config, dynamics: ActionDynamics, control_inference: ControlInference | None = None, passability: TerrainPassabilityModel | None = None) -> None:
         if control_inference is None:
-            control_inference = ControlInference()
+            control_inference = ControlInference(config)
         if passability is None:
-            passability = TerrainPassabilityModel()
+            passability = TerrainPassabilityModel(config)
         self.config = config
         self.dynamics = dynamics
         self.control_inference = control_inference
@@ -4373,26 +4558,10 @@ class CandidateGenerator:
         centroids = self._extract_object_centric_anchors(scene)
         proposals.extend(centroids)
 
-        # 2-Point Pair Macro Generator (Source Object -> Target Slot / Midpoint)
-        try:
-            if centroids:
-                # Top source anchor (first component/object centroid)
-                s_score, (sx, sy), s_why = centroids[0]
-                # High-confidence destination targets (grid center, opposite corner, pair midpoint)
-                dests = [
-                    (scene.width // 2, scene.height // 2),
-                    (max(0, scene.width - sx - 1), max(0, scene.height - sy - 1)),
-                ]
-                for dx, dy in dests:
-                    if (dx, dy) != (sx, sy):
-                        macro_score = 2.40 - 0.15 * self.coordinate_visits[(sx, sy)]
-                        proposals.append((macro_score, (sx, sy), f"macro_pair_src:dest=({dx},{dy})"))
-        except Exception:
-            pass
 
 
         # Stagnation boost: when in a recent state loop or NO-OP streak, boost unvisited frontier locations
-        is_stagnant = self.memory.recent_state_loop(12) or self.memory.no_op_streak >= 5
+        is_stagnant = self.memory.recent_state_loop(12) or self.memory.no_op_streak >= self.config.no_progress_cooldown_steps
         stagnation_boost = 0.85 if is_stagnant else 0.0
 
         # Resolution-adaptive unexplored frontier grid ensures coverage for any resolution.
@@ -4795,7 +4964,7 @@ class MetacognitiveController:
                 return True, "first_significant_transition"
         if self.memory.recent_state_loop(self.config.loop_window):
             return True, "loop"
-        if self.memory.no_op_streak >= 3:
+        if self.memory.no_op_streak >= self.config.no_progress_consecutive_threshold:
             return True, "stagnation"
         if scene.field_mode and scene.entity_confidence < 0.35:
             return True, "representation_conflict"
@@ -4869,7 +5038,7 @@ class MetacognitiveController:
             self.plan_queue.clear()
 
         # 0) Stagnation breakout: issue RESET if trapped in a 16+ NO-OP loop
-        if self.memory.no_op_streak >= 16 and "RESET" in legal_names and step + 30 <= self.config.max_actions:
+        if self.memory.no_op_streak >= self.config.no_progress_exhaustion_threshold and "RESET" in legal_names and step + 30 <= self.config.max_actions:
             self.memory.no_op_streak = 0
             self.plan_queue.clear()
             return ActionSpec(name="RESET", source="stagnation_breakout_reset"), False, {"stage": "stagnation_breakout_reset"}
@@ -5028,7 +5197,7 @@ class MetacognitiveController:
 
         # 6) Milestone-gated local model for A7/A8/A9 only.
         milestone, milestone_name = self._milestone(scene, step)
-        is_stagnant_now = is_looping or self.memory.no_op_streak >= 3
+        is_stagnant_now = is_looping or self.memory.no_op_streak >= self.config.no_progress_consecutive_threshold
         if profile.use_model and self.reasoner.can_call(step, milestone, is_stagnant=is_stagnant_now):
             current_feedback = ""
             for refinement_round in range(3):
@@ -5108,7 +5277,7 @@ class MetacognitiveController:
 
         # 7) Physical probes; EIG proxy comes from conditional hypothesis memory.
         probes: list[tuple[float, Candidate, AlignmentDecision]] = []
-        if self.memory.probes_this_level < self.config.max_physical_probes_per_level or self.memory.no_op_streak >= 8:
+        if self.memory.probes_this_level < self.config.max_physical_probes_per_level or self.memory.no_op_streak >= self.config.no_progress_cooldown_steps:
             for candidate in candidates:
                 if not candidate.is_probe:
                     continue
@@ -5120,7 +5289,7 @@ class MetacognitiveController:
                 eig = self.hypotheses.information_value(
                     candidate.signature) if profile.use_hypotheses else 0.0
                 score = candidate.score + 0.65 * eig + decision.score - 0.45
-                if self.memory.recent_state_loop(self.config.loop_window) or self.memory.no_op_streak >= 8:
+                if self.memory.recent_state_loop(self.config.loop_window) or self.memory.no_op_streak >= self.config.no_progress_cooldown_steps:
                     score += 0.65
                 probes.append((score, candidate, decision))
         if probes:
@@ -5179,7 +5348,6 @@ class MyAgent(Agent):
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self.config = Config(max_actions=self.MAX_ACTIONS)
-        self.macro_queue: deque[ActionSpec] = deque()
         self.dynamics = ActionDynamics()
         self._construct_modules()
         self.pending_scene: Scene | None = None
@@ -5384,6 +5552,9 @@ class MyAgent(Agent):
             self.alignment.observe(transition, self.pending_scene, scene)
         if profile.learn_programs:
             self.programs.record(transition, self.pending_scene, scene)
+        if self.config.enable_learned_passability:
+            self.path_planner.passability.record(transition, self.pending_scene)
+        self.path_planner.control_inference.record(transition)
 
         data = self.pending_action.data_dict
         anchor_x = int(data.get("x", self.pending_scene.width // 2))
@@ -5542,14 +5713,6 @@ class MyAgent(Agent):
                     "noop_streak": self.memory.no_op_streak},
             )
 
-        # Process queued 2-step macro action if present
-        if self.macro_queue:
-            next_spec = self.macro_queue.popleft()
-            return self._to_game_action(
-                next_spec,
-                legal_actions,
-                {"stage": "macro_step_2_execution", "queue_len": len(self.macro_queue)},
-            )
 
         runtime_tier = self.runtime.tier()
         spec, was_probe, decision = self.controller.choose(
