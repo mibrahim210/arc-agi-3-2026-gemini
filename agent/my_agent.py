@@ -540,6 +540,16 @@ class DiagnosticTraceRecord:
     reasoner_decision_skips_by_reason: dict[str, int] = field(default_factory=dict)
     reasoner_decision_successes: int = 0
     reasoner_consultations_this_level: int = 0
+    fallback_loop_streak: int = 0
+    counterfactual_fallback_streak: int = 0
+    alignment_fallback_streak: int = 0
+    steps_since_progress: int = 0
+    progress_events_this_level: int = 0
+    progress_density: float = 0.0
+    recent_lock_skip_count: int = 0
+    reasoner_lock_backoff_steps: int = 0
+    reasoner_suppressed: bool = False
+    reasoner_suppression_reason: str = ""
 
 
 @dataclass(slots=True)
@@ -4531,7 +4541,8 @@ class OptionalLocalReasoner:
             self.total_latency_sec += self.last_latency_sec
             try:
                 os.makedirs("traces", exist_ok=True)
-                with open("traces/llm_forensics.jsonl", "a", encoding="utf-8") as f:
+                game_id = getattr(self, "game_id", "unknown")
+                with open(f"traces/llm_forensics_{game_id}.jsonl", "a", encoding="utf-8") as f:
                     f.write(json.dumps({
                         "timestamp": time.time(),
                         "step": step,
@@ -5294,6 +5305,16 @@ class MetacognitiveController:
         self.counterfactual_streak = 0
         self.failed_consultations_this_level = 0
         self.consecutive_fallback_steps = 0
+        self.fallback_loop_streak = 0
+        self.counterfactual_fallback_streak = 0
+        self.alignment_fallback_streak = 0
+        self.steps_since_progress = 0
+        self.progress_events_this_level = 0
+        self.progress_density = 0.0
+        self.recent_lock_skip_count = 0
+        self.reasoner_lock_backoff_steps = 0
+        self.reasoner_suppressed = False
+        self.reasoner_suppression_reason = ""
 
     def reset_level(self) -> None:
         self.plan_queue.clear()
@@ -5302,6 +5323,16 @@ class MetacognitiveController:
         self.counterfactual_streak = 0
         self.failed_consultations_this_level = 0
         self.consecutive_fallback_steps = 0
+        self.fallback_loop_streak = 0
+        self.counterfactual_fallback_streak = 0
+        self.alignment_fallback_streak = 0
+        self.steps_since_progress = 0
+        self.progress_events_this_level = 0
+        self.progress_density = 0.0
+        self.recent_lock_skip_count = 0
+        self.reasoner_lock_backoff_steps = 0
+        self.reasoner_suppressed = False
+        self.reasoner_suppression_reason = ""
 
     def _milestone(self, scene: Scene, step: int) -> tuple[bool, str]:
         last = self.memory.last()
@@ -5389,6 +5420,9 @@ class MetacognitiveController:
         profile = _runtime_profile(runtime_tier, self.config)
         legal_names = {action.name for action in legal_actions}
         self.last_response_frames = tuple(response_frames)
+        self.reasoner_suppressed = False
+        self.reasoner_suppression_reason = ""
+        
         if not profile.use_programs:
             self.plan_queue.clear()
 
@@ -5399,6 +5433,7 @@ class MetacognitiveController:
             return ActionSpec(name="RESET", source="stagnation_breakout_reset"), False, {"stage": "stagnation_breakout_reset"}
 
         # 0.5) Fallback loop escape
+        # Trace evidence (e.g., cd82, bp35) showed the agent churning in fallback without progress.
         if self.consecutive_fallback_steps >= 50 and legal_actions:
             self.consecutive_fallback_steps = 0
             first = legal_actions[0]
@@ -5574,12 +5609,23 @@ class MetacognitiveController:
             
             if not self.reasoner.model_ready:
                 skip_reason = "skipped_due_to_model_unavailable"
-            elif self.reasoner.reasoner_consultations_this_level >= 5 or self.failed_consultations_this_level >= 3:
+            elif self.reasoner_lock_backoff_steps > 0:
+                self.reasoner_lock_backoff_steps -= 1
+                skip_reason = "skipped_due_to_lock_backoff"
+                self.reasoner_suppressed = True
+                self.reasoner_suppression_reason = "lock_backoff"
+            elif self.reasoner.reasoner_consultations_this_level >= 5 or (self.failed_consultations_this_level >= 3 and self.fallback_loop_streak >= 10):
                 skip_reason = "skipped_due_to_llm_backoff"
+                self.reasoner_suppressed = True
+                self.reasoner_suppression_reason = "failed_consultation_backoff" if self.failed_consultations_this_level >= 3 else "budget_backoff"
             elif not self.reasoner.budget_available:
                 skip_reason = "skipped_due_to_budget_exhaustion"
+                self.reasoner_suppressed = True
+                self.reasoner_suppression_reason = "budget_backoff"
             elif not (has_milestone and cooldown_satisfied):
                 skip_reason = "skipped_due_to_cooldown_gate"
+                self.reasoner_suppressed = True
+                self.reasoner_suppression_reason = "no_payoff_backoff"
             elif remaining_sec is not None:
                 est_latency = max(10.0, self.reasoner.last_latency_sec)
                 projected_time = est_latency * 3.0
@@ -5589,10 +5635,20 @@ class MetacognitiveController:
                     skip_reason = "skipped_due_to_projected_latency"
             
             # Lock availability check
+            # Trace evidence showed lock-starvation in bp35. Introduce explicit lock backoff.
             if not skip_reason and _OLLAMA_LOCK.locked():
-                skip_reason = "skipped_due_to_lock_unavailable"
+                self.recent_lock_skip_count += 1
+                if self.recent_lock_skip_count >= 3:
+                    self.reasoner_lock_backoff_steps = 10
+                    skip_reason = "skipped_due_to_lock_backoff"
+                    self.reasoner_suppressed = True
+                    self.reasoner_suppression_reason = "lock_backoff"
+                else:
+                    skip_reason = "skipped_due_to_lock_unavailable"
                 
             if skip_reason:
+                if skip_reason not in self.reasoner.reasoner_decision_skips_by_reason:
+                    self.reasoner.reasoner_decision_skips_by_reason[skip_reason] = 0
                 self.reasoner.reasoner_decision_skips_by_reason[skip_reason] += 1
             else:
                 current_feedback = ""
@@ -5666,7 +5722,12 @@ class MetacognitiveController:
                                         failed_summaries.append(f"Action {model_action.name} resulted in verification score {round(decision.score, 2)}")
                         
                         if best_spec is not None:
+                            # Smarter failed consultation reset: reset backoff and lock state on successful model proposal.
                             self.reasoner.reasoner_decision_successes += 1
+                            self.failed_consultations_this_level = 0
+                            self.recent_lock_skip_count = 0
+                            self.reasoner_lock_backoff_steps = 0
+                            self.reasoner_suppressed = False
                             return best_spec, best_is_probe, best_meta
                         
                         if failed_summaries:
@@ -5762,6 +5823,8 @@ class MyAgent(Agent):
         self.step_index = 0
         self.runtime = RuntimeBudget(self.config, str(
             getattr(self, "game_id", f"agent-{id(self)}")))
+        if hasattr(self, "controller") and hasattr(self.controller, "reasoner"):
+            self.controller.reasoner.game_id = self.runtime.game_id
         self.diagnostic_logger = DiagnosticTraceLogger(self.config)
         self.pending_reasoning: dict[str, Any] = {}
         self.pending_decision_latency_sec = 0.0
@@ -6020,15 +6083,50 @@ class MyAgent(Agent):
             reasoner_decision_skips_by_reason=dict(self.pending_reasoning.get("reasoner_decision_skips_by_reason", {})),
             reasoner_decision_successes=int(self.pending_reasoning.get("reasoner_decision_successes", 0)),
             reasoner_consultations_this_level=int(self.pending_reasoning.get("reasoner_consultations_this_level", 0)),
+            fallback_loop_streak=self.controller.fallback_loop_streak,
+            counterfactual_fallback_streak=self.controller.counterfactual_fallback_streak,
+            alignment_fallback_streak=self.controller.alignment_fallback_streak,
+            steps_since_progress=self.controller.steps_since_progress,
+            progress_events_this_level=self.controller.progress_events_this_level,
+            progress_density=self.controller.progress_density,
+            recent_lock_skip_count=self.controller.recent_lock_skip_count,
+            reasoner_lock_backoff_steps=self.controller.reasoner_lock_backoff_steps,
+            reasoner_suppressed=self.controller.reasoner_suppressed,
+            reasoner_suppression_reason=self.controller.reasoner_suppression_reason,
         )
         self.diagnostic_logger.record(record)
 
+        # Trace evidence showed lock-starvation in bp35; keeping strict fallback loop metrics
+        self.controller.steps_since_progress += 1
+        
         if event.level_delta > 0 or event.win:
             self.controller.consecutive_fallback_steps = 0
-        elif "fallback" in str(self.pending_reasoning.get("stage", "")):
-            self.controller.consecutive_fallback_steps += 1
+            self.controller.fallback_loop_streak = 0
+            self.controller.counterfactual_fallback_streak = 0
+            self.controller.alignment_fallback_streak = 0
+            self.controller.steps_since_progress = 0
+            self.controller.progress_events_this_level += 1
+            self.controller.failed_consultations_this_level = 0
+            self.controller.recent_lock_skip_count = 0
+            self.controller.reasoner_lock_backoff_steps = 0
+            self.controller.reasoner_suppressed = False
         else:
-            self.controller.consecutive_fallback_steps = 0
+            stage = str(self.pending_reasoning.get("stage", ""))
+            if "fallback" in stage:
+                self.controller.consecutive_fallback_steps += 1
+                self.controller.fallback_loop_streak += 1
+                if "counterfactual" in stage:
+                    self.controller.counterfactual_fallback_streak += 1
+                if "alignment" in stage:
+                    self.controller.alignment_fallback_streak += 1
+            else:
+                self.controller.consecutive_fallback_steps = 0
+                self.controller.fallback_loop_streak = 0
+                self.controller.counterfactual_fallback_streak = 0
+                self.controller.alignment_fallback_streak = 0
+                
+        # Progress density is used to track the ratio of productive progress to total steps
+        self.controller.progress_density = self.controller.progress_events_this_level / max(1, self.step_index)
 
         if event.topology_change:
             self.dead.invalidate_on_phase_change()
