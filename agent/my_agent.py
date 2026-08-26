@@ -4324,6 +4324,7 @@ class OptionalLocalReasoner:
             "skipped_due_to_lock_unavailable": 0,
             "skipped_due_to_model_unavailable": 0,
             "skipped_due_to_cooldown_gate": 0,
+            "skipped_due_to_llm_backoff": 0,
         }
         self.reasoner_decision_successes = 0
         self.reasoner_consultations_this_level = 0
@@ -4478,6 +4479,9 @@ class OptionalLocalReasoner:
             return None
 
         started = time.monotonic()
+        text = ""
+        parsed = None
+        error = None
         try:
             self.calls += 1
             self.calls_this_level += 1
@@ -4504,7 +4508,8 @@ class OptionalLocalReasoner:
                     result = json.loads(resp.read().decode('utf-8'))
                     text = result.get("response", "").strip()
                 print(f"[Ollama LLM Call #{self.calls}] Tag: {getattr(self, 'detected_tag', 'unknown')} | Latency: {time.monotonic()-started:.2f}s | Output: {text[:80]}...", file=sys.stderr)
-                return self._extract_json(text)
+                parsed = self._extract_json(text)
+                return parsed
             else:
                 # In-process llama_cpp inference
                 res = self._model(
@@ -4514,14 +4519,29 @@ class OptionalLocalReasoner:
                     stop=["}\n", "}\r\n"]
                 )
                 text = res["choices"][0]["text"].strip()
-                return self._extract_json(text)
+                parsed = self._extract_json(text)
+                return parsed
         except Exception as exc:
+            error = str(exc)
             print(f"[LLM Reasoner Transient Error] {exc}", file=sys.stderr)
             return None
         finally:
             _OLLAMA_LOCK.release()
             self.last_latency_sec = max(0.0, time.monotonic() - started)
             self.total_latency_sec += self.last_latency_sec
+            try:
+                os.makedirs("traces", exist_ok=True)
+                with open("traces/llm_forensics.jsonl", "a", encoding="utf-8") as f:
+                    f.write(json.dumps({
+                        "timestamp": time.time(),
+                        "step": step,
+                        "prompt": prompt,
+                        "raw_output": text,
+                        "parsed_output": parsed,
+                        "error": error
+                    }) + "\n")
+            except Exception:
+                pass
 
     def propose(
         self,
@@ -5272,12 +5292,16 @@ class MetacognitiveController:
         self.last_model_milestone = ""
         self.last_response_frames: tuple[np.ndarray, ...] = ()
         self.counterfactual_streak = 0
+        self.failed_consultations_this_level = 0
+        self.consecutive_fallback_steps = 0
 
     def reset_level(self) -> None:
         self.plan_queue.clear()
         self.last_model_milestone = ""
         self.last_response_frames = ()
         self.counterfactual_streak = 0
+        self.failed_consultations_this_level = 0
+        self.consecutive_fallback_steps = 0
 
     def _milestone(self, scene: Scene, step: int) -> tuple[bool, str]:
         last = self.memory.last()
@@ -5373,6 +5397,15 @@ class MetacognitiveController:
             self.memory.no_op_streak = 0
             self.plan_queue.clear()
             return ActionSpec(name="RESET", source="stagnation_breakout_reset"), False, {"stage": "stagnation_breakout_reset"}
+
+        # 0.5) Fallback loop escape
+        if self.consecutive_fallback_steps >= 50 and legal_actions:
+            self.consecutive_fallback_steps = 0
+            first = legal_actions[0]
+            data_fallback: tuple[tuple[str, int], ...] = ()
+            if first.is_complex():
+                data_fallback = (("x", scene.width // 2), ("y", scene.height // 2))
+            return ActionSpec(name=first.name, data=data_fallback, source="fallback_loop_escape"), True, {"stage": "fallback_loop_escape"}
 
         # 1) Exact observed progress and replay graph are available in every tier.
         replay = (
@@ -5541,6 +5574,8 @@ class MetacognitiveController:
             
             if not self.reasoner.model_ready:
                 skip_reason = "skipped_due_to_model_unavailable"
+            elif self.reasoner.reasoner_consultations_this_level >= 5 or self.failed_consultations_this_level >= 3:
+                skip_reason = "skipped_due_to_llm_backoff"
             elif not self.reasoner.budget_available:
                 skip_reason = "skipped_due_to_budget_exhaustion"
             elif not (has_milestone and cooldown_satisfied):
@@ -5640,6 +5675,8 @@ class MetacognitiveController:
                             current_feedback = "All proposals rejected due to parsing or validation constraints."
                     else:
                         break
+                
+                self.failed_consultations_this_level += 1
 
         # 7) Physical probes; EIG proxy comes from conditional hypothesis memory.
         probes: list[tuple[float, Candidate, AlignmentDecision]] = []
@@ -5985,6 +6022,13 @@ class MyAgent(Agent):
             reasoner_consultations_this_level=int(self.pending_reasoning.get("reasoner_consultations_this_level", 0)),
         )
         self.diagnostic_logger.record(record)
+
+        if event.level_delta > 0 or event.win:
+            self.controller.consecutive_fallback_steps = 0
+        elif "fallback" in str(self.pending_reasoning.get("stage", "")):
+            self.controller.consecutive_fallback_steps += 1
+        else:
+            self.controller.consecutive_fallback_steps = 0
 
         if event.topology_change:
             self.dead.invalidate_on_phase_change()
