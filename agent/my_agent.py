@@ -4540,9 +4540,9 @@ class OptionalLocalReasoner:
             self.last_latency_sec = max(0.0, time.monotonic() - started)
             self.total_latency_sec += self.last_latency_sec
             try:
-                os.makedirs("traces", exist_ok=True)
+                os.makedirs(self.config.trace_dir, exist_ok=True)
                 game_id = getattr(self, "game_id", "unknown")
-                with open(f"traces/llm_forensics_{game_id}.jsonl", "a", encoding="utf-8") as f:
+                with open(os.path.join(self.config.trace_dir, f"llm_forensics_{game_id}.jsonl"), "a", encoding="utf-8") as f:
                     f.write(json.dumps({
                         "timestamp": time.time(),
                         "step": step,
@@ -4622,7 +4622,7 @@ class OptionalLocalReasoner:
 
         history_str = ""
         seen_expressions: set[str] = set()
-        max_rounds = 8
+        max_rounds = 3
         for round_index in range(max_rounds):
             if not self.available:
                 return None
