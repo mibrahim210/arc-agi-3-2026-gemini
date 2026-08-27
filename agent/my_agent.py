@@ -233,6 +233,12 @@ class Config:
     program_verify_limit: int = _env_int("DEWMA_PROGRAM_VERIFY_LIMIT", 64)
     min_time_for_llm_sec: int = _env_int("DEWMA_MIN_TIME_FOR_LLM", 45)
 
+    llm_level_warmup_steps: int = _env_int("DEWMA_LLM_LEVEL_WARMUP_STEPS", 12)
+    llm_recent_transitions_limit: int = _env_int("DEWMA_LLM_RECENT_TRANSITIONS_LIMIT", 4)
+    llm_goals_limit: int = _env_int("DEWMA_LLM_GOALS_LIMIT", 3)
+    llm_programs_limit: int = _env_int("DEWMA_LLM_PROGRAMS_LIMIT", 3)
+    llm_action_semantics_limit: int = _env_int("DEWMA_LLM_ACTION_SEMANTICS_LIMIT", 4)
+
 
     trace_enabled: bool = _env_bool("DEWMA_TRACE_ENABLED", True)
     trace_to_disk: bool = _env_bool("DEWMA_TRACE_TO_DISK", True)
@@ -555,6 +561,9 @@ class DiagnosticTraceRecord:
     llm_empty_abduction_count: int = 0
     llm_parsed_abduction_count: int = 0
     llm_diversity_pruned_count: int = 0
+    competing_hypothesis_count: int = 0
+    stuck_mode_activations: int = 0
+    action_semantics_summary: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -1874,6 +1883,36 @@ class TraceMemory:
         self.no_op_streak = self.no_op_streak + 1 if transition.event.no_op else 0
         if was_probe:
             self.probes_this_level += 1
+
+    def repeated_effect_signature(self, window: int = 8) -> tuple[str, int] | None:
+        if len(self.transitions) < 2:
+            return None
+        recent = list(self.transitions)[-window:]
+        counts: Counter[str] = Counter(
+            t.event.effect_signature for t in recent if t.event.effect_signature
+        )
+        if not counts:
+            return None
+        signature, support = counts.most_common(1)[0]
+        return (signature, support) if support >= 3 else None
+
+    def recent_death_count(self, window: int = 10) -> int:
+        recent = list(self.transitions)[-window:]
+        return sum(1 for t in recent if t.event.game_over)
+
+    def recent_action_pattern(self, window: int = 8) -> str:
+        recent = list(self.transitions)[-window:]
+        if not recent:
+            return "none"
+        actions = [t.action.name for t in recent]
+        if len(set(actions)) == 1:
+            return f"single_action:{actions[0]}"
+        signatures = [t.event.effect_signature for t in recent if t.event.effect_signature]
+        if signatures and len(set(signatures)) == 1:
+            return "repeated_effect_signature"
+        if all(t.event.no_op for t in recent):
+            return "all_noop"
+        return "mixed"
 
     def tried_count(self, state_key: str, spec: ActionSpec) -> int:
         return self.actions_by_state[state_key][spec.key]
@@ -3827,19 +3866,57 @@ class ActionDynamics:
     def __init__(self) -> None:
         self.vectors: dict[str, Counter[tuple[int, int]]
                            ] = defaultdict(Counter)
+        self.action_stats: dict[str, Counter[str]] = defaultdict(Counter)
+        self.effect_signatures: dict[str, Counter[str]] = defaultdict(Counter)
 
     def reset_all(self) -> None:
         self.vectors.clear()
+        self.action_stats.clear()
+        self.effect_signatures.clear()
 
-    def record(self, action: ActionSpec, event: Event, controlled_id: str | None) -> None:
-        if action.data or controlled_id is None:
-            return
-        for entity_id, dx, dy in event.entity_moves:
-            if entity_id == controlled_id and (dx or dy):
-                # Normalize large sprite shifts to one cardinal/diagonal step.
-                ndx = 0 if dx == 0 else (1 if dx > 0 else -1)
-                ndy = 0 if dy == 0 else (1 if dy > 0 else -1)
-                self.vectors[action.name][(ndx, ndy)] += 1
+    def record(self, action: ActionSpec, event: Event, scene: Scene | None) -> None:
+        stats = self.action_stats[action.name]
+        stats["observed"] += 1
+        if action.data:
+            stats["targeted"] += 1
+        else:
+            stats["simple"] += 1
+        if event.no_op:
+            stats["noop"] += 1
+        if event.game_over:
+            stats["death"] += 1
+        if event.level_delta > 0 or event.win:
+            stats["progress"] += 1
+        if event.topology_change:
+            stats["topology"] += 1
+        if event.changed_count > 0:
+            stats["changed"] += 1
+        if event.effect_signature:
+            self.effect_signatures[action.name][event.effect_signature] += 1
+
+        controlled_id = None if scene is None else scene.controlled_entity_id
+        if not action.data and controlled_id is not None:
+            for entity_id, dx, dy in event.entity_moves:
+                if entity_id == controlled_id and (dx or dy):
+                    ndx = 0 if dx == 0 else (1 if dx > 0 else -1)
+                    ndy = 0 if dy == 0 else (1 if dy > 0 else -1)
+                    self.vectors[action.name][(ndx, ndy)] += 1
+                    stats["movement_like"] += 1
+                elif dx or dy:
+                    stats["noncontrolled_motion"] += 1
+
+        if scene is not None:
+            change_ratio = event.changed_count / max(1, scene.grid.size)
+            if change_ratio <= 0.03:
+                stats["local"] += 1
+            elif change_ratio >= 0.25:
+                stats["global"] += 1
+            else:
+                stats["regional"] += 1
+            if event.appeared_colors or event.disappeared_colors:
+                stats["recolor_or_spawn"] += 1
+            if event.changed_count > 0 and not event.entity_moves:
+                stats["field_effect"] += 1
 
     def action_for_vector(self, vector: tuple[int, int], legal_names: set[str]) -> str | None:
         ranked: list[tuple[int, str]] = []
@@ -3862,6 +3939,68 @@ class ActionDynamics:
                 if vector not in result or support > result[vector][0]:
                     result[vector] = (support, name)
         return {vector: name for vector, (_, name) in result.items()}
+
+    def summary_for_prompt(self, legal_names: set[str], limit: int = 8) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        for name, stats in self.action_stats.items():
+            if name not in legal_names:
+                continue
+            observed = max(1, stats["observed"])
+            sig = self.effect_signatures.get(name, Counter())
+            dominant_sig, dominant_support = ("", 0)
+            if sig:
+                dominant_sig, dominant_support = sig.most_common(1)[0]
+            rows.append({
+                "action": name,
+                "observed": observed,
+                "noop_rate": round(stats["noop"] / observed, 3),
+                "death_rate": round(stats["death"] / observed, 3),
+                "progress_rate": round(stats["progress"] / observed, 3),
+                "movement_rate": round(stats["movement_like"] / observed, 3),
+                "topology_rate": round(stats["topology"] / observed, 3),
+                "targeted_rate": round(stats["targeted"] / observed, 3),
+                "scope_hint": (
+                    "global" if stats["global"] >= max(stats["local"], stats["regional"]) else
+                    "regional" if stats["regional"] >= stats["local"] else
+                    "local"
+                ),
+                "dominant_effect_signature": dominant_sig[:16],
+                "dominant_effect_support": dominant_support,
+            })
+        rows.sort(key=lambda row: (row["observed"], row["progress_rate"], -row["noop_rate"]), reverse=True)
+        return rows[:limit]
+
+    def prior_for_action(self, action_name: str, program_kind: str | None = None) -> tuple[float, list[str]]:
+        stats = self.action_stats.get(action_name)
+        if not stats:
+            return 0.0, []
+        observed = max(1, stats["observed"])
+        reasons: list[str] = []
+        prior = 0.0
+        noop_rate = stats["noop"] / observed
+        death_rate = stats["death"] / observed
+        progress_rate = stats["progress"] / observed
+        if progress_rate > 0.0:
+            prior += 0.35 * progress_rate
+            reasons.append(f"progress_rate={progress_rate:.2f}")
+        if noop_rate > 0.55:
+            prior -= 0.45 * noop_rate
+            reasons.append(f"high_noop={noop_rate:.2f}")
+        if death_rate > 0.15:
+            prior -= 0.65 * death_rate
+            reasons.append(f"death_rate={death_rate:.2f}")
+        if program_kind:
+            kind = str(program_kind)
+            if kind in {"translation", "drag_component"} and stats["movement_like"] > 0:
+                prior += 0.25
+                reasons.append("movement_semantics_match")
+            if kind in {"conditional_recolor", "color_map", "component_recolor", "flood_fill"} and stats["recolor_or_spawn"] > 0:
+                prior += 0.20
+                reasons.append("recolor_semantics_match")
+            if kind in {"component_delete", "count_and_fill"} and stats["topology"] > 0:
+                prior += 0.18
+                reasons.append("topology_semantics_match")
+        return prior, reasons
 
 
 @dataclass(frozen=True, slots=True)
@@ -4548,6 +4687,7 @@ class OptionalLocalReasoner:
         self.llm_empty_abduction_count = 0
         self.llm_parsed_abduction_count = 0
         self.llm_diversity_pruned_count = 0
+        self.llm_impossible_hypothesis_rejections = 0
         self.recent_abductions: list[tuple[str, str]] = []
 
     @property
@@ -4618,6 +4758,14 @@ class OptionalLocalReasoner:
 
     def can_call(self, step: int, milestone: bool, is_stagnant: bool = False) -> bool:
         cooldown = max(2, self.config.model_cooldown_steps // 2) if is_stagnant else self.config.model_cooldown_steps
+        
+        if self.calls_this_level == 0 and not (milestone or is_stagnant):
+            game_id = getattr(self, "game_id", "unknown")
+            hash_offset = hash(game_id) % 5
+            warmup = self.config.llm_level_warmup_steps + hash_offset
+            if step < warmup:
+                return False
+                
         return (
             (milestone or is_stagnant)
             and self.available
@@ -4776,6 +4924,7 @@ class OptionalLocalReasoner:
         step: int,
         goals_summary: Sequence[Mapping[str, Any]] = (),
         programs_summary: Sequence[Mapping[str, Any]] = (),
+        action_semantics_summary: Sequence[Mapping[str, Any]] = (),
         response_frames: Sequence[np.ndarray] = (),
         feedback: str = "",
         bypass_can_call: bool = False,
@@ -4848,11 +4997,13 @@ class OptionalLocalReasoner:
             f"recent_transitions={json.dumps(recent, separators=(',', ':'))}\n"
             f"candidate_goals={json.dumps(list(goals_summary), separators=(',', ':'), default=str)}\n"
             f"verified_programs={json.dumps(list(programs_summary), separators=(',', ':'), default=str)}\n"
+            f"action_semantics={json.dumps(list(action_semantics_summary), separators=(',', ':'), default=str)}\n"
             "Examples of Optional Program Hypotheses (add inside suggested_programs):\n"
             "- Relational / Mechanism Inference: {\"kind\":\"conditional_recolor\",\"action\":\"ACTION1\",\"params\":{\"source_color\":2,\"target_color\":3,\"neighbor_color\":4}}\n"
             "- Object Manipulation (Delete): {\"kind\":\"component_delete\",\"action\":\"ACTION2\",\"params\":{\"background\":0,\"clicked_color\":-1}}\n"
             "- Movement / Translation: {\"kind\":\"translation\",\"action\":\"ACTION6\",\"params\":{\"dx\":1,\"dy\":0,\"selector_color\":3,\"background\":0}}\n"
             "- Pattern Copy / Extrapolation: {\"kind\":\"copy_pattern\",\"action\":\"ACTION4\",\"params\":{\"offsets\":[[0,1],[1,0]],\"colors\":[3,4]}}\n"
+            "Use action_semantics and mechanism_snapshot to infer whether an action behaves like movement, recolor, deletion, topology change, or targeted control.\n"
             "A program is a highly valued hypothesis and will be replay-verified before use.\n"
         )
 
@@ -5566,6 +5717,7 @@ class MetacognitiveController:
         self.reasoner_lock_backoff_steps = 0
         self.reasoner_suppressed = False
         self.reasoner_suppression_reason = ""
+        self.stuck_mode_activations = 0
 
     def reset_level(self) -> None:
         self.plan_queue.clear()
@@ -5584,6 +5736,7 @@ class MetacognitiveController:
         self.reasoner_lock_backoff_steps = 0
         self.reasoner_suppressed = False
         self.reasoner_suppression_reason = ""
+        self.stuck_mode_activations = 0
 
     def _milestone(self, scene: Scene, step: int) -> tuple[bool, str]:
         last = self.memory.last()
@@ -5733,6 +5886,50 @@ class MetacognitiveController:
 
         candidates = self.candidate_generator.generate(
             scene, legal_actions, use_hypotheses=profile.use_hypotheses)
+        action_semantics_summary = self.path_planner.dynamics.summary_for_prompt(legal_names)
+
+        # 2c) Stronger stuck-mode exploration once we have evidence of churn without progress.
+        repeated_effect = self.memory.repeated_effect_signature()
+        if (
+            self.steps_since_progress >= max(18, self.config.no_progress_exhaustion_threshold)
+            or self.memory.recent_death_count(10) >= 2
+            or (repeated_effect is not None and repeated_effect[1] >= 4)
+        ):
+            exploratory: list[tuple[float, Candidate, AlignmentDecision]] = []
+            repeated_sig = None if repeated_effect is None else repeated_effect[0]
+            recent_actions = {t.action.name for t in list(self.memory.transitions)[-6:]}
+            for candidate in candidates:
+                prediction = self._predict(scene, candidate.spec, profile)
+                decision = self._verify(
+                    scene, candidate.spec, legal_names, prediction, True, profile)
+                if not decision.allowed:
+                    continue
+                visits_penalty = 0.0
+                if candidate.spec.data:
+                    data_dict = dict(candidate.spec.data)
+                    x, y = data_dict.get("x"), data_dict.get("y")
+                    if x is not None and y is not None:
+                        visits_penalty = float(self.memory.spatial_visits.get((x, y), 0))
+                action_stats = self.path_planner.dynamics.action_stats.get(candidate.spec.name, Counter())
+                observed = max(1, action_stats.get("observed", 0))
+                novelty = 2.0 / observed
+                if candidate.spec.name not in recent_actions:
+                    novelty += 0.9
+                if repeated_sig and prediction is not None and prediction.expected_effect == repeated_sig:
+                    novelty -= 0.7
+                if self.dead.is_dead(candidate.signature):
+                    novelty -= 1.0
+                exploratory.append((novelty - 0.20 * visits_penalty + decision.score, candidate, decision))
+            if exploratory:
+                exploratory.sort(key=lambda row: row[0], reverse=True)
+                score, best, decision = exploratory[0]
+                self.stuck_mode_activations += 1
+                spec = ActionSpec(
+                    name=best.spec.name, data=best.spec.data, source="stuck_mode_exploration",
+                    predicted_effect=best.spec.predicted_effect, score=best.spec.score + score,
+                    goal_ids=decision.goal_ids,
+                )
+                return spec, True, {"stage": "stuck_mode_exploration", "score": round(score, 3)}
             
         # 2b) Forced Structural Probe (Boredom Override)
         if self.memory.same_family_streak >= 10:
@@ -5913,6 +6110,7 @@ class MetacognitiveController:
                         scene, sorted(legal_names), self.memory, step,
                         goals_summary=self.goals.summary() if profile.use_goals else (),
                         programs_summary=self.programs.summary() if profile.use_programs else (),
+                        action_semantics_summary=action_semantics_summary,
                         response_frames=response_frames,
                         feedback=current_feedback,
                         bypass_can_call=True,
@@ -5949,6 +6147,9 @@ class MetacognitiveController:
                             
                             model_action = proposal.action
                             if model_action is not None:
+                                prior_kind = proposal.program_spec.get("kind") if proposal.program_spec else None
+                                semantic_prior, semantic_reasons = self.path_planner.dynamics.prior_for_action(
+                                    model_action.name, prior_kind)
                                 if model_action.name not in legal_names:
                                     self.reasoner.llm_illegal_action_rejections += 1
                                     failed_summaries.append(f"Action {model_action.name} is not a valid legal action.")
@@ -5969,7 +6170,7 @@ class MetacognitiveController:
                                     and (not is_probe or self.memory.probes_this_level < self.config.max_physical_probes_per_level)
                                 ):
                                     self.last_model_milestone = milestone_name
-                                    score = model_action.score + decision.score
+                                    score = model_action.score + decision.score + semantic_prior
                                     if score > best_score:
                                         best_score = score
                                         best_spec = ActionSpec(
@@ -5986,6 +6187,8 @@ class MetacognitiveController:
                                             "stage": "milestone_model_goal_verified" if profile.use_alignment else "milestone_model_verified",
                                             "milestone": milestone_name,
                                             "alignment": round(decision.score, 3),
+                                            "semantic_prior": round(semantic_prior, 3),
+                                            "semantic_reasons": semantic_reasons[:3],
                                         }
                                 else:
                                     if proposal.program_spec is not None:
@@ -6295,8 +6498,7 @@ class MyAgent(Agent):
         self.world_model.record(transition)
         self.spatial_hash.record(
             self.pending_scene, scene, self.pending_action, event)
-        self.dynamics.record(self.pending_action, event,
-                             self.pending_scene.controlled_entity_id)
+        self.dynamics.record(self.pending_action, event, self.pending_scene)
         if profile.learn_goals:
             self.goals.update(transition, self.pending_scene, scene)
         if profile.learn_alignment:
@@ -6375,6 +6577,9 @@ class MyAgent(Agent):
             llm_empty_abduction_count=self.controller.reasoner.llm_empty_abduction_count,
             llm_parsed_abduction_count=self.controller.reasoner.llm_parsed_abduction_count,
             llm_diversity_pruned_count=self.controller.reasoner.llm_diversity_pruned_count,
+            competing_hypothesis_count=int(self.pending_reasoning.get("competing_hypothesis_count", 0)),
+            stuck_mode_activations=self.controller.stuck_mode_activations,
+            action_semantics_summary=dict(self.pending_reasoning.get("action_semantics", {})) if isinstance(self.pending_reasoning.get("action_semantics", {}), dict) else {"rows": self.pending_reasoning.get("action_semantics", [])},
         )
         self.diagnostic_logger.record(record)
 
@@ -6505,6 +6710,7 @@ class MyAgent(Agent):
 
         legal_actions = _normalize_legal_actions(latest_frame)
         legal_names = {a.name for a in legal_actions}
+        action_semantics_summary = self.dynamics.summary_for_prompt(legal_names)
         if not legal_actions:
             # Fail closed: do not invent ACTION1..7. RESET is the only safe
             # compatibility action, and the reason is visible in the trace.
@@ -6584,6 +6790,7 @@ class MyAgent(Agent):
             "model_calls": self.reasoner.calls,
             "active_goals": self.goals.summary(4) if _runtime_profile(runtime_tier, self.config).use_goals else [],
             "verified_programs": self.programs.summary(4) if _runtime_profile(runtime_tier, self.config).use_programs else [],
+            "action_semantics": action_semantics_summary,
             "runtime_tier": runtime_tier,
             "runtime_remaining_sec": self.runtime.remaining_sec(),
             "runtime_projected_remaining_sec": self.runtime.projected_remaining_sec(),
@@ -6613,6 +6820,13 @@ class MyAgent(Agent):
             "reasoner_decision_skips_by_reason": self.reasoner.reasoner_decision_skips_by_reason,
             "reasoner_decision_successes": self.reasoner.reasoner_decision_successes,
             "reasoner_consultations_this_level": self.reasoner.reasoner_consultations_this_level,
+            "competing_hypothesis_count": sum(
+                1
+                for g in self.goals.active(4)
+                if self.goals.active(4)
+                and g.confidence >= max(x.confidence for x in self.goals.active(4)) - 0.08
+            ) if self.goals.hypotheses else 0,
+            "stuck_mode_activations": self.controller.stuck_mode_activations,
         }
         if event is not None:
             reasoning["previous_event"] = {
