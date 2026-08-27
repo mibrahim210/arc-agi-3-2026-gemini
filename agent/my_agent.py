@@ -1064,6 +1064,134 @@ class GridInspector:
             hints["diagonal_main"] = bool(np.array_equal(self._grid, self._grid.T))
         return hints
 
+    def mechanism_snapshot(self, recent_transitions: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+        if self._previous is None or self._previous.shape != self._grid.shape:
+            return {"error": "no_previous_frame"}
+            
+        diff = self._grid != self._previous
+        changed_count = int(np.count_nonzero(diff))
+        if changed_count == 0:
+            return {"status": "no_changes"}
+            
+        prev_hist = {int(v): int(c) for v, c in zip(*np.unique(self._previous, return_counts=True))}
+        curr_hist = self.color_histogram()
+        
+        pure_translation = (prev_hist == curr_hist)
+        
+        color_deltas = {}
+        dominant_shift_color = -1
+        max_shift = 0
+        for c in set(prev_hist.keys()) | set(curr_hist.keys()):
+            delta = curr_hist.get(c, 0) - prev_hist.get(c, 0)
+            if delta != 0:
+                color_deltas[c] = delta
+                if abs(delta) > abs(max_shift):
+                    max_shift = delta
+                    dominant_shift_color = c
+
+        if max_shift > 0:
+            dominant_color_shift = f"spawn_color_{dominant_shift_color}"
+        elif max_shift < 0:
+            dominant_color_shift = f"delete_color_{dominant_shift_color}"
+        else:
+            dominant_color_shift = "none"
+        
+        prev_inspector = GridInspector(self._previous)
+        prev_comps = len(prev_inspector.connected_components())
+        curr_comps = len(self.connected_components())
+        topology_changed = (prev_comps != curr_comps)
+        
+        component_change_summary = {
+            "prev_component_count": prev_comps,
+            "curr_component_count": curr_comps,
+            "component_delta": curr_comps - prev_comps,
+            "dominant_changed_color": int(dominant_shift_color),
+        }
+        
+        def _sym_score(g: np.ndarray) -> int:
+            score = 0
+            if np.array_equal(g, np.fliplr(g)): score += 1
+            if np.array_equal(g, np.flipud(g)): score += 1
+            if g.shape[0] == g.shape[1] and np.array_equal(g, g.T): score += 1
+            return score
+            
+        prev_sym = _sym_score(self._previous)
+        curr_sym = _sym_score(self._grid)
+        if curr_sym > prev_sym: sym_status = "increased"
+        elif curr_sym < prev_sym: sym_status = "decreased"
+        else: sym_status = "unchanged"
+        
+        ys, xs = np.where(diff)
+        bbox = (int(np.min(xs)), int(np.min(ys)), int(np.max(xs)), int(np.max(ys)))
+        bbox_area = (bbox[2] - bbox[0] + 1) * (bbox[3] - bbox[1] + 1)
+        grid_area = self._grid.size
+        change_ratio = round(changed_count / grid_area, 3)
+        bbox_ratio = bbox_area / grid_area
+        
+        if bbox_ratio < 0.1:
+            locality_hint = "highly_local"
+        elif bbox_ratio < 0.4:
+            locality_hint = "regional"
+        elif bbox_ratio > 0.8 and change_ratio > 0.5:
+            locality_hint = "global"
+        elif bbox_ratio > 0.8 and change_ratio < 0.2:
+            locality_hint = "diffuse"
+        else:
+            locality_hint = "unknown"
+            
+        if bbox_area <= 9 or bbox_area < grid_area * 0.15:
+            scope = "local"
+        elif bbox_area >= grid_area * 0.8:
+            scope = "global"
+        else:
+            scope = "regional"
+            
+        prev_changed_colors = np.unique(self._previous[diff])
+        curr_changed_colors = np.unique(self._grid[diff])
+        is_flood_like = (len(prev_changed_colors) == 1 and len(curr_changed_colors) == 1 and changed_count > 4)
+        if is_flood_like:
+            scope = "flood-like"
+            
+        if pure_translation:
+            motion_hint = "translation_like"
+        elif not pure_translation and is_flood_like:
+            motion_hint = "recolor_like"
+        elif max_shift != 0 and abs(sum(color_deltas.values())) == abs(max_shift):
+            motion_hint = "spawn_delete_like"
+        else:
+            motion_hint = "mixed"
+            
+        recent_transition_pattern = "unknown"
+        if recent_transitions:
+            actions = [str(t.get("action", "")) for t in recent_transitions]
+            if len(set(actions)) == 1 and actions[0].startswith("ACTION"):
+                if actions[0] in {"ACTION6", "ACTION7", "ACTION8", "ACTION9"}:
+                    recent_transition_pattern = "movement_repeated"
+                elif actions[0] in {"ACTION1", "ACTION2", "ACTION3", "ACTION4", "ACTION5"}:
+                    recent_transition_pattern = "recolor_or_delete_repeated"
+                else:
+                    recent_transition_pattern = "same_action_repeated"
+            elif all("ACTION" in a for a in actions):
+                recent_transition_pattern = "mixed"
+            
+        return {
+            "pure_translation": pure_translation,
+            "topology_change": topology_changed,
+            "topology_changed": topology_changed,
+            "symmetry": sym_status,
+            "effect_scope": scope,
+            "changed_cell_count": changed_count,
+            "color_deltas": color_deltas,
+            "dominant_color_shift": dominant_color_shift,
+            "changed_bbox": bbox,
+            "change_ratio": change_ratio,
+            "locality_hint": locality_hint,
+            "motion_hint": motion_hint,
+            "component_change_summary": component_change_summary,
+            "controlled_entity_shift": {"status": "unknown"},
+            "recent_transition_pattern": recent_transition_pattern,
+        }
+
     def summary(self) -> dict[str, Any]:
         hist = self.color_histogram()
         changed = self.changed_cells()
@@ -4692,6 +4820,7 @@ class OptionalLocalReasoner:
             "In Python execution, `recent_transitions` (list of dicts) is available in the global namespace. Use print() to output results.\n"
             f"legal_actions={list(legal_names)}\n"
             f"state_summary={inspector.summary()}\n"
+            f"mechanism_snapshot={inspector.mechanism_snapshot(recent)}\n"
             f"entity_confidence={scene.entity_confidence:.3f}, field_mode={scene.field_mode}\n"
             f"recent_transitions={json.dumps(recent, separators=(',', ':'))}\n"
             f"candidate_goals={json.dumps(list(goals_summary), separators=(',', ':'), default=str)}\n"
