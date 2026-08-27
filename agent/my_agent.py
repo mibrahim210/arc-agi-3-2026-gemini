@@ -239,12 +239,6 @@ class Config:
     llm_programs_limit: int = _env_int("DEWMA_LLM_PROGRAMS_LIMIT", 3)
     llm_action_semantics_limit: int = _env_int("DEWMA_LLM_ACTION_SEMANTICS_LIMIT", 4)
 
-    llm_level_warmup_steps: int = _env_int("DEWMA_LLM_LEVEL_WARMUP_STEPS", 12)
-    llm_recent_transitions_limit: int = _env_int("DEWMA_LLM_RECENT_TRANSITIONS_LIMIT", 4)
-    llm_goals_limit: int = _env_int("DEWMA_LLM_GOALS_LIMIT", 3)
-    llm_programs_limit: int = _env_int("DEWMA_LLM_PROGRAMS_LIMIT", 3)
-    llm_action_semantics_limit: int = _env_int("DEWMA_LLM_ACTION_SEMANTICS_LIMIT", 4)
-
 
     trace_enabled: bool = _env_bool("DEWMA_TRACE_ENABLED", True)
     trace_to_disk: bool = _env_bool("DEWMA_TRACE_TO_DISK", True)
@@ -4766,7 +4760,7 @@ class OptionalLocalReasoner:
     def can_call(self, step: int, milestone: bool, is_stagnant: bool = False) -> bool:
         cooldown = max(2, self.config.model_cooldown_steps // 2) if is_stagnant else self.config.model_cooldown_steps
         
-        if self.calls_this_level == 0 and not (milestone or is_stagnant):
+        if self.calls_this_level == 0 and not is_stagnant:
             game_id = getattr(self, "game_id", "unknown")
             hash_offset = hash(game_id) % 5
             warmup = self.config.llm_level_warmup_steps + hash_offset
@@ -6111,6 +6105,14 @@ class MetacognitiveController:
                 skip_reason = "skipped_due_to_budget_exhaustion"
                 self.reasoner_suppressed = True
                 self.reasoner_suppression_reason = "budget_backoff"
+            elif self.reasoner.calls_this_level == 0 and not is_stagnant_now:
+                # Force stagger for the first call unless severely stagnant
+                game_id = getattr(self.reasoner, "game_id", "unknown")
+                warmup = self.config.llm_level_warmup_steps + (hash(game_id) % 5)
+                if step < warmup:
+                    skip_reason = "skipped_due_to_warmup_gate"
+                    self.reasoner_suppressed = True
+                    self.reasoner_suppression_reason = "warmup_stagger"
             elif not (has_milestone and cooldown_satisfied):
                 skip_reason = "skipped_due_to_cooldown_gate"
                 self.reasoner_suppressed = True
