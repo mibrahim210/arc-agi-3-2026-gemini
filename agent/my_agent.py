@@ -562,6 +562,16 @@ class DiagnosticTraceRecord:
     llm_parsed_abduction_count: int = 0
     llm_diversity_pruned_count: int = 0
     llm_impossible_hypothesis_rejections: int = 0
+    llm_unsupported_family_rejections: int = 0
+    llm_family_repeat_rejections: int = 0
+    llm_schema_valid_but_unexecutable: int = 0
+    llm_filtered_for_action_mismatch: int = 0
+    reasoner_consulted_this_step: bool = False
+    reasoner_parsed_abduction_this_step: bool = False
+    reasoner_surviving_proposals_this_step: int = 0
+    final_action_from_llm: bool = False
+    final_action_source: str = ""
+    stagnation_override_used: bool = False
     competing_hypothesis_count: int = 0
     stuck_mode_activations: int = 0
     action_semantics_summary: dict[str, Any] = field(default_factory=dict)
@@ -4689,6 +4699,10 @@ class OptionalLocalReasoner:
         self.llm_parsed_abduction_count = 0
         self.llm_diversity_pruned_count = 0
         self.llm_impossible_hypothesis_rejections = 0
+        self.llm_unsupported_family_rejections = 0
+        self.llm_family_repeat_rejections = 0
+        self.llm_schema_valid_but_unexecutable = 0
+        self.llm_filtered_for_action_mismatch = 0
         self.recent_abductions: list[tuple[str, str]] = []
 
     @property
@@ -5018,11 +5032,17 @@ class OptionalLocalReasoner:
             f"candidate_goals={json.dumps(list(goals_summary)[:self.config.llm_goals_limit], separators=(',', ':'), default=str)}\n"
             f"verified_programs={json.dumps(list(programs_summary)[:self.config.llm_programs_limit], separators=(',', ':'), default=str)}\n"
             f"action_semantics={json.dumps(list(action_semantics_summary)[:self.config.llm_action_semantics_limit], separators=(',', ':'), default=str)}\n"
-            "Examples of Optional Program Hypotheses (add inside suggested_programs):\n"
-            "- Relational / Mechanism Inference: {\"kind\":\"conditional_recolor\",\"action\":\"ACTION1\",\"params\":{\"source_color\":2,\"target_color\":3,\"neighbor_color\":4}}\n"
-            "- Object Manipulation (Delete): {\"kind\":\"component_delete\",\"action\":\"ACTION2\",\"params\":{\"background\":0,\"clicked_color\":-1}}\n"
-            "- Movement / Translation: {\"kind\":\"translation\",\"action\":\"ACTION6\",\"params\":{\"dx\":1,\"dy\":0,\"selector_color\":3,\"background\":0}}\n"
-            "- Pattern Copy / Extrapolation: {\"kind\":\"copy_pattern\",\"action\":\"ACTION4\",\"params\":{\"offsets\":[[0,1],[1,0]],\"colors\":[3,4]}}\n"
+            "Examples of Supported Program Hypotheses (add inside suggested_programs):\n"
+            "- conditional_recolor: {\"kind\":\"conditional_recolor\",\"action\":\"ACTION1\",\"params\":{\"source_color\":2,\"target_color\":3,\"neighbor_color\":4}}\n"
+            "- component_delete: {\"kind\":\"component_delete\",\"action\":\"ACTION2\",\"params\":{\"background\":0}}\n"
+            "- component_recolor: {\"kind\":\"component_recolor\",\"action\":\"ACTION2\",\"params\":{\"target_color\":5}}\n"
+            "- translation: {\"kind\":\"translation\",\"action\":\"ACTION6\",\"params\":{\"dx\":1,\"dy\":0,\"selector_color\":3,\"background\":0}}\n"
+            "- drag_component: {\"kind\":\"drag_component\",\"action\":\"ACTION6\",\"params\":{\"dx\":0,\"dy\":1,\"background\":0}}\n"
+            "- line_connect: {\"kind\":\"line_connect\",\"action\":\"ACTION3\",\"params\":{\"color\":2,\"p1\":[2,3],\"p2\":[8,3]}}\n"
+            "- flood_fill: {\"kind\":\"flood_fill\",\"action\":\"ACTION6\",\"params\":{\"x\":4,\"y\":5,\"target_color\":1}}\n"
+            "- gravity: {\"kind\":\"gravity\",\"action\":\"ACTION1\",\"params\":{\"dx\":0,\"dy\":1,\"background\":0}}\n"
+            "- copy_pattern: {\"kind\":\"copy_pattern\",\"action\":\"ACTION4\",\"params\":{\"offsets\":[[0,1],[1,0]],\"colors\":[3,4]}}\n"
+            "- count_and_fill: {\"kind\":\"count_and_fill\",\"action\":\"ACTION5\",\"params\":{\"offsets\":[[0,0],[0,1]],\"target_color\":4}}\n"
             "Use action_semantics and mechanism_snapshot to infer whether an action behaves like movement, recolor, deletion, topology change, or targeted control.\n"
             "A program is a highly valued hypothesis and will be replay-verified before use.\n"
         )
@@ -5041,7 +5061,10 @@ class OptionalLocalReasoner:
             else:
                 instruction = "MANDATORY: You have already inspected the state. You MUST now propose an abduction hypothesis using the final abduction schema.\n"
 
-            prompt = system_context + instruction + history_str
+            dyn_hint = ""
+            if self.llm_impossible_hypothesis_rejections > 0 or self.llm_repetitive_kind_rejections > 0:
+                dyn_hint = "HINT: Recent proposals encountered rejections. Ensure referenced colors exist in the scene and diversify hypothesis families beyond simple recolor.\n"
+            prompt = system_context + dyn_hint + instruction + history_str
             obj = self._generate_json(prompt, step)
             if not obj:
                 return None
@@ -5100,9 +5123,20 @@ class OptionalLocalReasoner:
                 if not isinstance(proposals_data, list):
                     proposals_data = []
                 
+                supported_kinds = {
+                    "conditional_recolor", "translation", "component_delete", "component_recolor",
+                    "line_connect", "drag_component", "flood_fill", "gravity", "copy_pattern",
+                    "count_and_fill", "color_map", "local_patch_replace", "cellular_rule"
+                }
                 results: list[AbductionProposal] = []
                 for prop in proposals_data:
                     if not isinstance(prop, dict):
+                        continue
+                    
+                    kind = prop.get("kind")
+                    if kind and kind not in supported_kinds:
+                        self.llm_unsupported_family_rejections += 1
+                        history_str += f"abduction_error=unsupported_program_kind ({kind})\n"
                         continue
                     
                     is_impossible, reason = self._is_impossible_hypothesis(scene, prop)
@@ -5112,6 +5146,10 @@ class OptionalLocalReasoner:
                         continue
 
                     name = str(prop.get("action", "")).upper()
+                    if not name:
+                        self.llm_schema_valid_but_unexecutable += 1
+                        history_str += "abduction_error=missing_action_name\n"
+                        continue
                     data: tuple[tuple[str, int], ...] = ()
                     if prop.get("x") is not None or prop.get("y") is not None:
                         try:
@@ -5745,6 +5783,7 @@ class MetacognitiveController:
         self.reasoner_suppressed = False
         self.reasoner_suppression_reason = ""
         self.stuck_mode_activations = 0
+        self.stagnation_override_count_this_level = 0
 
     def reset_level(self) -> None:
         self.plan_queue.clear()
@@ -5764,6 +5803,7 @@ class MetacognitiveController:
         self.reasoner_suppressed = False
         self.reasoner_suppression_reason = ""
         self.stuck_mode_activations = 0
+        self.stagnation_override_count_this_level = 0
 
     def _milestone(self, scene: Scene, step: int) -> tuple[bool, str]:
         last = self.memory.last()
@@ -5956,7 +5996,7 @@ class MetacognitiveController:
                     predicted_effect=best.spec.predicted_effect, score=best.spec.score + score,
                     goal_ids=decision.goal_ids,
                 )
-                return spec, True, {"stage": "stuck_mode_exploration", "score": round(score, 3)}
+                return spec, True, {"stage": "stuck_mode_exploration", "final_action_source": "stuck_mode_exploration", "score": round(score, 3)}
             
         # 2b) Forced Structural Probe (Boredom Override)
         if self.memory.same_family_streak >= 10:
@@ -5994,7 +6034,7 @@ class MetacognitiveController:
                     predicted_effect=best.spec.predicted_effect, score=score, goal_ids=decision.goal_ids
                 )
                 self.memory.same_family_streak = 0
-                return spec, True, {"stage": "forced_structural_probe", "score": round(score, 3)}
+                return spec, True, {"stage": "forced_structural_probe", "final_action_source": "forced_structural_probe", "score": round(score, 3)}
 
         # 3) A9-only bounded counterfactual planning with anti-hijack grounding.
         is_looping = self.memory.recent_state_loop(self.config.loop_window)
@@ -6004,8 +6044,10 @@ class MetacognitiveController:
             if cf_plan.prediction is not None and cf_plan.first_action is not None and (self.counterfactual_streak < 15 or profile.use_programs):
                 self.counterfactual_streak += 1
                 self.plan_queue.extend(cf_plan.remaining)
+                stage_name = "counterfactual_program_search" if profile.use_programs and not self.dead.is_dead("counterfactual_program_search") and self.counterfactual_streak < 15 else "counterfactual_fallback"
                 return cf_plan.first_action, False, {
-                    "stage": "counterfactual_program_search" if profile.use_programs and not self.dead.is_dead("counterfactual_program_search") and self.counterfactual_streak < 15 else "counterfactual_fallback",
+                    "stage": stage_name,
+                    "final_action_source": "counterfactual_program" if "program" in stage_name else "counterfactual_search",
                     "program": cf_plan.prediction.program_id,
                     "program_kind": cf_plan.prediction.kind,
                     "alignment": round(cf_plan.alignment.score, 3),
@@ -6037,7 +6079,7 @@ class MetacognitiveController:
                     goal_ids=decision.goal_ids,
                 )
                 self.counterfactual_streak += 1
-                return spec, prediction is None, {"stage": "path_planner", "alignment": round(decision.score, 3)}
+                return spec, prediction is None, {"stage": "path_planner", "final_action_source": "path_planner", "alignment": round(decision.score, 3)}
             else:
                 self.counterfactual_streak = 0
 
@@ -6063,15 +6105,31 @@ class MetacognitiveController:
             )
             return spec, False, {
                 "stage": "mental_replay_hash_goal_gate" if profile.use_alignment else "mental_replay_hash",
+                "final_action_source": "verified_program" if spec.program_id else "mental_replay",
                 "score": round(score, 3),
                 "alignment": round(decision.score, 3),
                 "goal_delta": round(decision.goal_delta, 3),
                 "rationale": best.rationale[:4],
             }
 
-        # 6) Milestone-gated local model for A7/A8/A9 only.
+        # 6) Milestone-gated local model for A7/A8/A9 only with safe stagnation override.
         milestone, milestone_name = self._milestone(scene, step)
         is_stagnant_now = is_looping or self.memory.no_op_streak >= self.config.no_progress_consecutive_threshold
+        
+        stagnation_override_active = False
+        long_stagnation = (self.steps_since_progress >= 40 or self.memory.no_op_streak >= 12)
+        if (
+            not (milestone or is_stagnant_now)
+            and long_stagnation
+            and self.stagnation_override_count_this_level < 3
+            and (remaining_sec is None or remaining_sec > 120)
+            and self.reasoner.budget_available
+            and not _OLLAMA_LOCK.locked()
+        ):
+            is_stagnant_now = True
+            stagnation_override_active = True
+            self.stagnation_override_count_this_level += 1
+            milestone_name = "stagnation_override"
         
         if profile.use_model and (milestone or is_stagnant_now):
             self.reasoner.reasoner_decision_attempts += 1
@@ -6140,6 +6198,9 @@ class MetacognitiveController:
                 self.reasoner.model_decisions_used_this_level += 1
                 self.reasoner.reasoner_consultations_this_level += 1
                 
+                consulted_this_step = True
+                parsed_abduction_this_step = False
+                surviving_proposals_this_step = 0
                 for refinement_round in range(3):
                     proposals = self.reasoner.propose(
                         scene, sorted(legal_names), self.memory, step,
@@ -6151,6 +6212,7 @@ class MetacognitiveController:
                         bypass_can_call=True,
                     )
                     if proposals is not None:
+                        parsed_abduction_this_step = True
                         self.reasoner.llm_parsed_abduction_count += 1
                         best_spec = None
                         best_is_probe = False
@@ -6167,6 +6229,7 @@ class MetacognitiveController:
                                 pair = (fam, kind)
                                 if recent.count(pair) >= 3:
                                     self.reasoner.llm_repetitive_kind_rejections += 1
+                                    self.reasoner.llm_family_repeat_rejections += 1
                                     failed_summaries.append(f"Skipping heavily repeated pattern {pair} without progress.")
                                     continue
                                 recent.append(pair)
@@ -6187,10 +6250,12 @@ class MetacognitiveController:
                                     model_action.name, prior_kind)
                                 if model_action.name not in legal_names:
                                     self.reasoner.llm_illegal_action_rejections += 1
+                                    self.reasoner.llm_filtered_for_action_mismatch += 1
                                     failed_summaries.append(f"Action {model_action.name} is not a valid legal action.")
                                     continue
                                 if model_action.name == "ACTION6" and not ("x" in model_action.data_dict and "y" in model_action.data_dict):
                                     self.reasoner.llm_illegal_action_rejections += 1
+                                    self.reasoner.llm_schema_valid_but_unexecutable += 1
                                     failed_summaries.append("ACTION6 requires coordinates but none provided.")
                                     continue
                                 signature = _action_signature(scene, model_action)
@@ -6204,6 +6269,7 @@ class MetacognitiveController:
                                     and decision.allowed
                                     and (not is_probe or self.memory.probes_this_level < self.config.max_physical_probes_per_level)
                                 ):
+                                    surviving_proposals_this_step += 1
                                     self.last_model_milestone = milestone_name
                                     score = model_action.score + decision.score + semantic_prior
                                     if score > best_score:
@@ -6220,6 +6286,12 @@ class MetacognitiveController:
                                         best_is_probe = is_probe
                                         best_meta = {
                                             "stage": "milestone_model_goal_verified" if profile.use_alignment else "milestone_model_verified",
+                                            "final_action_source": "llm_probe" if is_probe else "llm_program",
+                                            "final_action_from_llm": True,
+                                            "reasoner_consulted_this_step": True,
+                                            "reasoner_parsed_abduction_this_step": True,
+                                            "reasoner_surviving_proposals_this_step": surviving_proposals_this_step,
+                                            "stagnation_override_used": stagnation_override_active,
                                             "milestone": milestone_name,
                                             "alignment": round(decision.score, 3),
                                             "semantic_prior": round(semantic_prior, 3),
@@ -6234,6 +6306,7 @@ class MetacognitiveController:
                         
                         if best_spec is not None:
                             # Smarter failed consultation reset: reset backoff and lock state on successful model proposal.
+                            best_meta["reasoner_surviving_proposals_this_step"] = surviving_proposals_this_step
                             self.reasoner.reasoner_decision_successes += 1
                             self.failed_consultations_this_level = 0
                             self.recent_lock_skip_count = 0
@@ -6280,6 +6353,7 @@ class MetacognitiveController:
             )
             return spec, True, {
                 "stage": "admissible_goal_discriminating_probe" if profile.use_goals else "admissible_hypothesis_probe",
+                "final_action_source": "goal_discriminating_probe" if profile.use_goals else "hypothesis_discriminating_probe",
                 "score": round(score, 3),
                 "probe_budget_used": self.memory.probes_this_level,
                 "goals": list(decision.goal_ids),
@@ -6296,8 +6370,10 @@ class MetacognitiveController:
                 safest.append(
                     (candidate.score + decision.score - decision.risk, candidate))
             safest.sort(key=lambda row: row[0], reverse=True)
+            stage_name = "alignment_constrained_fallback" if profile.use_alignment else "deterministic_fallback"
             return safest[0][1].spec, safest[0][1].is_probe, {
-                "stage": "alignment_constrained_fallback" if profile.use_alignment else "deterministic_fallback"
+                "stage": stage_name,
+                "final_action_source": "alignment_fallback" if profile.use_alignment else "deterministic_fallback"
             }
 
         reset = next((a for a in legal_actions if a.name == "RESET"), None)
@@ -6613,6 +6689,16 @@ class MyAgent(Agent):
             llm_parsed_abduction_count=self.controller.reasoner.llm_parsed_abduction_count,
             llm_diversity_pruned_count=self.controller.reasoner.llm_diversity_pruned_count,
             llm_impossible_hypothesis_rejections=self.controller.reasoner.llm_impossible_hypothesis_rejections,
+            llm_unsupported_family_rejections=self.controller.reasoner.llm_unsupported_family_rejections,
+            llm_family_repeat_rejections=self.controller.reasoner.llm_family_repeat_rejections,
+            llm_schema_valid_but_unexecutable=self.controller.reasoner.llm_schema_valid_but_unexecutable,
+            llm_filtered_for_action_mismatch=self.controller.reasoner.llm_filtered_for_action_mismatch,
+            reasoner_consulted_this_step=bool(self.pending_reasoning.get("reasoner_consulted_this_step", False)),
+            reasoner_parsed_abduction_this_step=bool(self.pending_reasoning.get("reasoner_parsed_abduction_this_step", False)),
+            reasoner_surviving_proposals_this_step=int(self.pending_reasoning.get("reasoner_surviving_proposals_this_step", 0)),
+            final_action_from_llm=bool(self.pending_reasoning.get("final_action_from_llm", False)),
+            final_action_source=str(self.pending_reasoning.get("final_action_source", self.pending_action.source if self.pending_action else "")),
+            stagnation_override_used=bool(self.pending_reasoning.get("stagnation_override_used", False)),
             competing_hypothesis_count=int(self.pending_reasoning.get("competing_hypothesis_count", 0)),
             stuck_mode_activations=self.controller.stuck_mode_activations,
             action_semantics_summary=dict(self.pending_reasoning.get("action_semantics", {})) if isinstance(self.pending_reasoning.get("action_semantics", {}), dict) else {"rows": self.pending_reasoning.get("action_semantics", [])},
@@ -6810,6 +6896,13 @@ class MyAgent(Agent):
         reasoning: dict[str, Any] = {
             **decision,
             "source": spec.source,
+            "final_action_source": decision.get("final_action_source", spec.source),
+            "final_action_from_llm": decision.get("final_action_from_llm", False),
+            "reasoner_consulted_this_step": decision.get("reasoner_consulted_this_step", False),
+            "reasoner_parsed_abduction_this_step": decision.get("reasoner_parsed_abduction_this_step", False),
+            "reasoner_surviving_proposals_this_step": decision.get("reasoner_surviving_proposals_this_step", 0),
+            "stagnation_override_used": decision.get("stagnation_override_used", False),
+            "model_called": decision.get("reasoner_consulted_this_step", False),
             "predicted": spec.predicted_effect,
             "program_id": spec.program_id,
             "predicted_state": spec.predicted_state_key,
@@ -6857,6 +6950,10 @@ class MyAgent(Agent):
             "reasoner_decision_successes": self.reasoner.reasoner_decision_successes,
             "reasoner_consultations_this_level": self.reasoner.reasoner_consultations_this_level,
             "llm_impossible_hypothesis_rejections": self.reasoner.llm_impossible_hypothesis_rejections,
+            "llm_unsupported_family_rejections": self.reasoner.llm_unsupported_family_rejections,
+            "llm_family_repeat_rejections": self.reasoner.llm_family_repeat_rejections,
+            "llm_schema_valid_but_unexecutable": self.reasoner.llm_schema_valid_but_unexecutable,
+            "llm_filtered_for_action_mismatch": self.reasoner.llm_filtered_for_action_mismatch,
             "competing_hypothesis_count": sum(
                 1
                 for g in self.goals.active(4)
