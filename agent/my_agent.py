@@ -554,6 +554,7 @@ class DiagnosticTraceRecord:
     llm_repetitive_kind_rejections: int = 0
     llm_empty_abduction_count: int = 0
     llm_parsed_abduction_count: int = 0
+    llm_diversity_pruned_count: int = 0
 
 
 @dataclass(slots=True)
@@ -997,6 +998,72 @@ class GridInspector:
         ys, xs = np.where(transient)
         return [(int(x), int(y)) for y, x in zip(ys, xs)]
 
+    def connected_components(self, color: int | None = None) -> list[dict[str, Any]]:
+        components = []
+        h, w = self._grid.shape
+        seen = set()
+        for y in range(h):
+            for x in range(w):
+                c = int(self._grid[y, x])
+                if (x, y) in seen: continue
+                if color is not None and c != int(color): continue
+                if color is None and c == 0: continue
+                
+                stack = [(x, y)]
+                comp_points = []
+                while stack:
+                    cx, cy = stack.pop()
+                    if (cx, cy) in seen: continue
+                    if int(self._grid[cy, cx]) != c: continue
+                    seen.add((cx, cy))
+                    comp_points.append((cx, cy))
+                    for dx, dy in ((1,0),(-1,0),(0,1),(0,-1)):
+                        nx, ny = cx+dx, cy+dy
+                        if 0 <= nx < w and 0 <= ny < h:
+                            stack.append((nx, ny))
+                
+                xs = [p[0] for p in comp_points]
+                ys = [p[1] for p in comp_points]
+                components.append({
+                    "color": c,
+                    "size": len(comp_points),
+                    "centroid": (sum(xs)//len(xs), sum(ys)//len(ys)),
+                    "bbox": (min(xs), min(ys), max(xs), max(ys))
+                })
+        return components
+
+    def delta_summary(self) -> str:
+        if self._previous is None or self._previous.shape != self._grid.shape:
+            return "No previous frame or shape mismatch."
+        
+        diff = self._grid != self._previous
+        changed_count = int(np.count_nonzero(diff))
+        if changed_count == 0:
+            return "No changes."
+            
+        prev_hist = {int(v): int(c) for v, c in zip(*np.unique(self._previous, return_counts=True))}
+        curr_hist = self.color_histogram()
+        
+        color_changes = []
+        for c in sorted(set(prev_hist.keys()) | set(curr_hist.keys())):
+            delta = curr_hist.get(c, 0) - prev_hist.get(c, 0)
+            if delta != 0:
+                color_changes.append(f"Color {c}: {'+' if delta>0 else ''}{delta}")
+                
+        ys, xs = np.where(diff)
+        bbox = (int(np.min(xs)), int(np.min(ys)), int(np.max(xs)), int(np.max(ys)))
+        
+        return f"{changed_count} cells changed. Bounding box of changes: {bbox}. Net color shifts: {', '.join(color_changes)}"
+
+    def symmetry_hints(self) -> dict[str, bool]:
+        h, w = self._grid.shape
+        hints = {}
+        hints["horizontal"] = bool(np.array_equal(self._grid, np.fliplr(self._grid)))
+        hints["vertical"] = bool(np.array_equal(self._grid, np.flipud(self._grid)))
+        if h == w:
+            hints["diagonal_main"] = bool(np.array_equal(self._grid, self._grid.T))
+        return hints
+
     def summary(self) -> dict[str, Any]:
         hist = self.color_histogram()
         changed = self.changed_cells()
@@ -1005,6 +1072,7 @@ class GridInspector:
             "colors": hist,
             "changed_count": len(changed),
             "changed_bbox": _bbox(changed),
+            "delta_summary": self.delta_summary(),
             "animation_frames": self.animation_length(),
             "animation_step_changes": self.animation_changed_counts(),
             "transient_count": len(self.transient_cells()),
@@ -4347,6 +4415,7 @@ class OptionalLocalReasoner:
         self.llm_repetitive_kind_rejections = 0
         self.llm_empty_abduction_count = 0
         self.llm_parsed_abduction_count = 0
+        self.llm_diversity_pruned_count = 0
         self.recent_abductions: list[tuple[str, str]] = []
 
     @property
@@ -4609,16 +4678,17 @@ class OptionalLocalReasoner:
             "grid, execute python to analyze the state, or output "
             "an abductive explanation of recent transitions. Emit ONE JSON object only per response.\n"
             "Inspection schema: "
-            '{"type":"inspect","expression":"state.find_color(3)"}\n'
+            '{"type":"inspect","expression":"state.connected_components()"}\n'
             "Python schema (for data analysis only): "
             '{"type":"python","code":"for t in recent_transitions: print(t[\'action\'])"}\n'
-            "Final schema (emit abductive hypotheses for observed transitions!): "
-            '{"type":"abduction","puzzle_family":"color_matching","suggested_programs":[{"kind":"color_map","action":"ACTION1","params":{"mapping":{"2":3}},"why":"..."}, {"action":"...","why":"..."}]}\n'
+            "Final schema (infer the mechanism, relational structure, or control logic that caused the observed transition!): "
+            '{"type":"abduction","puzzle_family":"mechanism_inference","suggested_programs":[{"kind":"conditional_recolor","action":"ACTION1","params":{"source_color":2,"target_color":3,"neighbor_color":4},"why":"..."}, {"action":"...","why":"..."}]}\n'
             "CRITICAL: You MUST include the nested 'suggested_programs' array to propose a structural hypothesis!\n"
-            "Allowed state methods: summary(), shape(), find_color(value), count(value), "
-            "patch(x,y,radius), diff_last_frame(), changed_cells(), color_histogram(). "
+            "Allowed state methods: summary(), shape(), find_color(v), count(v), patch(x,y,r), "
+            "diff_last_frame(), changed_cells(), color_histogram(), connected_components(color), delta_summary(), symmetry_hints(). "
             "Prefer stored evidence and reversible progress. Do not request a physical "
             "probe unless it can change the decision. Complex actions require x,y.\n"
+            "MANDATORY: Do not propose slight variations of the same hypothesis. You must output at least two distinctly different hypotheses from different puzzle families (e.g. one conditional_recolor and one component_delete) if the cause is ambiguous. Verification is strict, so diversity maximizes our chances of finding the true mechanism.\n"
             "In Python execution, `recent_transitions` (list of dicts) is available in the global namespace. Use print() to output results.\n"
             f"legal_actions={list(legal_names)}\n"
             f"state_summary={inspector.summary()}\n"
@@ -4627,9 +4697,10 @@ class OptionalLocalReasoner:
             f"candidate_goals={json.dumps(list(goals_summary), separators=(',', ':'), default=str)}\n"
             f"verified_programs={json.dumps(list(programs_summary), separators=(',', ':'), default=str)}\n"
             "Examples of Optional Program Hypotheses (add inside suggested_programs):\n"
-            "- Color map: {\"kind\":\"color_map\",\"action\":\"ACTION1\",\"params\":{\"mapping\":{\"3\":4}}}\n"
-            "- Translation: {\"kind\":\"translation\",\"action\":\"ACTION6\",\"params\":{\"dx\":1,\"dy\":0,\"selector_color\":3,\"background\":0}}\n"
-            "- Delete: {\"kind\":\"component_delete\",\"action\":\"ACTION2\",\"params\":{\"background\":0,\"clicked_color\":-1}}\n"
+            "- Relational / Mechanism Inference: {\"kind\":\"conditional_recolor\",\"action\":\"ACTION1\",\"params\":{\"source_color\":2,\"target_color\":3,\"neighbor_color\":4}}\n"
+            "- Object Manipulation (Delete): {\"kind\":\"component_delete\",\"action\":\"ACTION2\",\"params\":{\"background\":0,\"clicked_color\":-1}}\n"
+            "- Movement / Translation: {\"kind\":\"translation\",\"action\":\"ACTION6\",\"params\":{\"dx\":1,\"dy\":0,\"selector_color\":3,\"background\":0}}\n"
+            "- Pattern Copy / Extrapolation: {\"kind\":\"copy_pattern\",\"action\":\"ACTION4\",\"params\":{\"offsets\":[[0,1],[1,0]],\"colors\":[3,4]}}\n"
             "A program is a highly valued hypothesis and will be replay-verified before use.\n"
         )
 
@@ -4734,7 +4805,24 @@ class OptionalLocalReasoner:
                 if results or puzzle_family:
                     if not results:
                         results.append(AbductionProposal(None, puzzle_family=puzzle_family if isinstance(puzzle_family, str) else None))
-                    return results
+                    
+                    diverse_results = []
+                    seen_pairs = set()
+                    for res in results:
+                        fam = res.puzzle_family or "none"
+                        knd = res.program_spec.get("kind", "none") if res.program_spec else "none"
+                        act = res.action.name if res.action else "none"
+                        pair = (fam, knd, act)
+                        if pair not in seen_pairs:
+                            seen_pairs.add(pair)
+                            diverse_results.append(res)
+                        else:
+                            self.llm_diversity_pruned_count += 1
+                            
+                    if not diverse_results and results:
+                        diverse_results = [results[0]]
+                        
+                    return diverse_results
                 return None
             return None
         return None
@@ -6134,6 +6222,7 @@ class MyAgent(Agent):
             llm_repetitive_kind_rejections=self.controller.reasoner.llm_repetitive_kind_rejections,
             llm_empty_abduction_count=self.controller.reasoner.llm_empty_abduction_count,
             llm_parsed_abduction_count=self.controller.reasoner.llm_parsed_abduction_count,
+            llm_diversity_pruned_count=self.controller.reasoner.llm_diversity_pruned_count,
         )
         self.diagnostic_logger.record(record)
 
