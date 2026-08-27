@@ -4759,14 +4759,6 @@ class OptionalLocalReasoner:
 
     def can_call(self, step: int, milestone: bool, is_stagnant: bool = False) -> bool:
         cooldown = max(2, self.config.model_cooldown_steps // 2) if is_stagnant else self.config.model_cooldown_steps
-        
-        if self.calls_this_level == 0 and not is_stagnant:
-            game_id = getattr(self, "game_id", "unknown")
-            hash_offset = hash(game_id) % 5
-            warmup = self.config.llm_level_warmup_steps + hash_offset
-            if step < warmup:
-                return False
-                
         return (
             (milestone or is_stagnant)
             and self.available
