@@ -4815,12 +4815,12 @@ class OptionalLocalReasoner:
         if not isinstance(params, dict):
             return False, ""
             
-        color_counts = scene.color_counts
+        color_counts = dict(scene.color_counts)
         
         # Color checks (must exist in current grid)
         for key in ["source_color", "neighbor_color", "selector_color"]:
             color = params.get(key)
-            if isinstance(color, int) and color >= 0 and color <= 9:
+            if isinstance(color, int) and 0 <= color <= 9:
                 if color_counts.get(color, 0) == 0:
                     return True, f"color {color} not found in grid"
                     
