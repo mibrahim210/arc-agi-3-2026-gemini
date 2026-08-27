@@ -1064,7 +1064,7 @@ class GridInspector:
             hints["diagonal_main"] = bool(np.array_equal(self._grid, self._grid.T))
         return hints
 
-    def mechanism_snapshot(self, recent_transitions: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    def mechanism_snapshot(self, recent_transitions: list[dict[str, Any]] | None = None, controlled_entity_shift: dict[str, Any] | None = None) -> dict[str, Any]:
         if self._previous is None or self._previous.shape != self._grid.shape:
             return {"error": "no_previous_frame"}
             
@@ -1188,7 +1188,7 @@ class GridInspector:
             "locality_hint": locality_hint,
             "motion_hint": motion_hint,
             "component_change_summary": component_change_summary,
-            "controlled_entity_shift": {"status": "unknown"},
+            "controlled_entity_shift": controlled_entity_shift or {"status": "unknown"},
             "recent_transition_pattern": recent_transition_pattern,
         }
 
@@ -1281,6 +1281,10 @@ class SafeRepl:
             "animation_length",
             "animation_changed_counts",
             "transient_cells",
+            "connected_components",
+            "delta_summary",
+            "symmetry_hints",
+            "mechanism_snapshot",
         }
         for node in ast.walk(tree):
             if not isinstance(node, self._ALLOWED_NODES):
@@ -4801,6 +4805,25 @@ class OptionalLocalReasoner:
             for t in list(memory.transitions)[-8:]
         ]
         
+        controlled_shift = {"status": "unknown"}
+        if scene.controlled_entity_id:
+            last_event = None
+            if memory.transitions:
+                last_event = list(memory.transitions)[-1].event
+            
+            if last_event and getattr(last_event, "entity_moves", None) is not None:
+                found = False
+                for eid, dx, dy in last_event.entity_moves:
+                    if eid == scene.controlled_entity_id:
+                        controlled_shift = {"status": "known", "dx": dx, "dy": dy, "moved": bool(dx or dy)}
+                        found = True
+                        break
+                if not found:
+                    if any(e.entity_id == scene.controlled_entity_id for e in scene.entities):
+                        controlled_shift = {"status": "known", "dx": 0, "dy": 0, "moved": False}
+                    else:
+                        controlled_shift = {"status": "disappeared"}
+        
         system_context = (
             "You control an unknown ARC-AGI-3 environment. You may inspect the "
             "grid, execute python to analyze the state, or output "
@@ -4820,7 +4843,7 @@ class OptionalLocalReasoner:
             "In Python execution, `recent_transitions` (list of dicts) is available in the global namespace. Use print() to output results.\n"
             f"legal_actions={list(legal_names)}\n"
             f"state_summary={inspector.summary()}\n"
-            f"mechanism_snapshot={inspector.mechanism_snapshot(recent)}\n"
+            f"mechanism_snapshot={inspector.mechanism_snapshot(recent, controlled_shift)}\n"
             f"entity_confidence={scene.entity_confidence:.3f}, field_mode={scene.field_mode}\n"
             f"recent_transitions={json.dumps(recent, separators=(',', ':'))}\n"
             f"candidate_goals={json.dumps(list(goals_summary), separators=(',', ':'), default=str)}\n"
