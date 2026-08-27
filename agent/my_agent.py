@@ -550,6 +550,11 @@ class DiagnosticTraceRecord:
     reasoner_lock_backoff_steps: int = 0
     reasoner_suppressed: bool = False
     reasoner_suppression_reason: str = ""
+    llm_illegal_action_rejections: int = 0
+    llm_repetitive_family_rejections: int = 0
+    llm_repetitive_kind_rejections: int = 0
+    llm_empty_abduction_count: int = 0
+    llm_parsed_abduction_count: int = 0
 
 
 @dataclass(slots=True)
@@ -4338,6 +4343,13 @@ class OptionalLocalReasoner:
         }
         self.reasoner_decision_successes = 0
         self.reasoner_consultations_this_level = 0
+        
+        self.llm_illegal_action_rejections = 0
+        self.llm_repetitive_family_rejections = 0
+        self.llm_repetitive_kind_rejections = 0
+        self.llm_empty_abduction_count = 0
+        self.llm_parsed_abduction_count = 0
+        self.recent_abductions: list[tuple[str, str]] = []
 
     @property
     def model_ready(self) -> bool:
@@ -5675,6 +5687,19 @@ class MetacognitiveController:
                         failed_summaries = []
                         
                         for proposal in proposals:
+                            fam = proposal.puzzle_family or "none"
+                            kind = proposal.program_spec.get("kind", "none") if proposal.program_spec else "none"
+                            if fam != "none" or kind != "none":
+                                recent = self.reasoner.recent_abductions
+                                pair = (fam, kind)
+                                if recent.count(pair) >= 3:
+                                    self.reasoner.llm_repetitive_kind_rejections += 1
+                                    failed_summaries.append(f"Skipping heavily repeated pattern {pair} without progress.")
+                                    continue
+                                recent.append(pair)
+                                if len(recent) > 10:
+                                    recent.pop(0)
+
                             if proposal.puzzle_family is not None:
                                 self.goals.adjust_priors(proposal.puzzle_family)
                             if proposal.program_spec is not None and profile.use_programs:
@@ -5684,6 +5709,14 @@ class MetacognitiveController:
                             
                             model_action = proposal.action
                             if model_action is not None:
+                                if model_action.name not in legal_names:
+                                    self.reasoner.llm_illegal_action_rejections += 1
+                                    failed_summaries.append(f"Action {model_action.name} is not a valid legal action.")
+                                    continue
+                                if model_action.name == "ACTION6" and not ("x" in model_action.data_dict and "y" in model_action.data_dict):
+                                    self.reasoner.llm_illegal_action_rejections += 1
+                                    failed_summaries.append("ACTION6 requires coordinates but none provided.")
+                                    continue
                                 signature = _action_signature(scene, model_action)
                                 is_probe = self.memory.tried_count(
                                     scene.exact_key, model_action) == 0
@@ -5735,9 +5768,12 @@ class MetacognitiveController:
                         else:
                             current_feedback = "All proposals rejected due to parsing or validation constraints."
                     else:
+                        self.reasoner.llm_empty_abduction_count += 1
                         break
                 
-                self.failed_consultations_this_level += 1
+                # Smarter failed consultation backoff: only strongly penalize if we actually parsed something and it was fully rejected
+                if current_feedback and current_feedback != "All proposals rejected due to parsing or validation constraints.":
+                    self.failed_consultations_this_level += 1
 
         # 7) Physical probes; EIG proxy comes from conditional hypothesis memory.
         probes: list[tuple[float, Candidate, AlignmentDecision]] = []
@@ -6056,7 +6092,7 @@ class MyAgent(Agent):
                     **self.pending_action.data_dict},
             after_key=transition.after_exact,
             decision_stage=str(self.pending_reasoning.get(
-                "stage", self.pending_action.source)),
+                "stage", getattr(self.pending_action, "source", ""))) or "fallback_default",
             expected_effect=self.pending_action.predicted_effect,
             observed_effect=event.effect_signature,
             no_op=event.no_op,
@@ -6093,6 +6129,11 @@ class MyAgent(Agent):
             reasoner_lock_backoff_steps=self.controller.reasoner_lock_backoff_steps,
             reasoner_suppressed=self.controller.reasoner_suppressed,
             reasoner_suppression_reason=self.controller.reasoner_suppression_reason,
+            llm_illegal_action_rejections=self.controller.reasoner.llm_illegal_action_rejections,
+            llm_repetitive_family_rejections=self.controller.reasoner.llm_repetitive_family_rejections,
+            llm_repetitive_kind_rejections=self.controller.reasoner.llm_repetitive_kind_rejections,
+            llm_empty_abduction_count=self.controller.reasoner.llm_empty_abduction_count,
+            llm_parsed_abduction_count=self.controller.reasoner.llm_parsed_abduction_count,
         )
         self.diagnostic_logger.record(record)
 
@@ -6110,6 +6151,7 @@ class MyAgent(Agent):
             self.controller.recent_lock_skip_count = 0
             self.controller.reasoner_lock_backoff_steps = 0
             self.controller.reasoner_suppressed = False
+            self.controller.reasoner.recent_abductions.clear()
         else:
             stage = str(self.pending_reasoning.get("stage", ""))
             if "fallback" in stage:
@@ -6152,6 +6194,11 @@ class MyAgent(Agent):
 
     def choose_action(self, frames: list[FrameData], latest_frame: FrameData) -> GameAction:
         decision_started = time.monotonic()
+        if hasattr(self, "game_id"):
+            self.runtime.game_id = self.game_id
+            if hasattr(self, "controller") and hasattr(self.controller, "reasoner"):
+                self.controller.reasoner.game_id = self.game_id
+        
         self.step_index += 1
         if bool(getattr(latest_frame, "full_reset", False)):
             self._full_reset()
