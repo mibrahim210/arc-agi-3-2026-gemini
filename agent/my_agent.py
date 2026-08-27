@@ -5843,7 +5843,7 @@ class MetacognitiveController:
 class MyAgent(Agent):
     """DEWMA-ARC v4 agent with level-scoped alignment and global runtime control."""
 
-    MAX_ACTIONS = _env_int("DEWMA_MAX_ACTIONS", 600)
+    MAX_ACTIONS = _env_int("DEWMA_MAX_ACTIONS", 400)
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
