@@ -4711,16 +4711,14 @@ class OptionalLocalReasoner:
                     if not isinstance(prop, dict):
                         continue
                     name = str(prop.get("action", "")).upper()
-                    if name not in legal_names:
-                        continue
                     data: tuple[tuple[str, int], ...] = ()
                     if prop.get("x") is not None or prop.get("y") is not None:
-                        if prop.get("x") is None or prop.get("y") is None:
-                            continue
-                        x, y = int(prop["x"]), int(prop["y"])
-                        if not (0 <= x < scene.width and 0 <= y < scene.height):
-                            continue
-                        data = (("x", x), ("y", y))
+                        try:
+                            x_val, y_val = prop.get("x"), prop.get("y")
+                            if x_val is not None and y_val is not None:
+                                data = (("x", int(x_val)), ("y", int(y_val)))
+                        except (ValueError, TypeError):
+                            pass
                     confidence = float(prop.get("confidence", 0.5))
                     action_spec = ActionSpec(
                         name=name,
