@@ -551,7 +551,6 @@ class DiagnosticTraceRecord:
     reasoner_suppressed: bool = False
     reasoner_suppression_reason: str = ""
     llm_illegal_action_rejections: int = 0
-    llm_repetitive_family_rejections: int = 0
     llm_repetitive_kind_rejections: int = 0
     llm_empty_abduction_count: int = 0
     llm_parsed_abduction_count: int = 0
@@ -4345,7 +4344,6 @@ class OptionalLocalReasoner:
         self.reasoner_consultations_this_level = 0
         
         self.llm_illegal_action_rejections = 0
-        self.llm_repetitive_family_rejections = 0
         self.llm_repetitive_kind_rejections = 0
         self.llm_empty_abduction_count = 0
         self.llm_parsed_abduction_count = 0
@@ -4553,7 +4551,10 @@ class OptionalLocalReasoner:
             self.total_latency_sec += self.last_latency_sec
             try:
                 os.makedirs(self.config.trace_dir, exist_ok=True)
-                game_id = getattr(self, "game_id", "unknown")
+                if hasattr(self, "get_game_id"):
+                    game_id = self.get_game_id()
+                else:
+                    game_id = getattr(self, "game_id", "unknown")
                 with open(os.path.join(self.config.trace_dir, f"llm_forensics_{game_id}.jsonl"), "a", encoding="utf-8") as f:
                     f.write(json.dumps({
                         "timestamp": time.time(),
@@ -5626,10 +5627,10 @@ class MetacognitiveController:
                 skip_reason = "skipped_due_to_lock_backoff"
                 self.reasoner_suppressed = True
                 self.reasoner_suppression_reason = "lock_backoff"
-            elif self.reasoner.reasoner_consultations_this_level >= 5 or (self.failed_consultations_this_level >= 3 and self.fallback_loop_streak >= 10):
+            elif self.reasoner.reasoner_consultations_this_level >= 10 or self.failed_consultations_this_level >= 4:
                 skip_reason = "skipped_due_to_llm_backoff"
                 self.reasoner_suppressed = True
-                self.reasoner_suppression_reason = "failed_consultation_backoff" if self.failed_consultations_this_level >= 3 else "budget_backoff"
+                self.reasoner_suppression_reason = "failed_consultation_backoff" if self.failed_consultations_this_level >= 4 else "budget_backoff"
             elif not self.reasoner.budget_available:
                 skip_reason = "skipped_due_to_budget_exhaustion"
                 self.reasoner_suppressed = True
@@ -5679,6 +5680,7 @@ class MetacognitiveController:
                         bypass_can_call=True,
                     )
                     if proposals is not None:
+                        self.reasoner.llm_parsed_abduction_count += 1
                         best_spec = None
                         best_is_probe = False
                         best_meta = None
@@ -5884,6 +5886,7 @@ class MyAgent(Agent):
         self.programs = ExecutableProgramLibrary(self.config)
         self.path_planner = PathPlanner(self.config, self.dynamics)
         self.reasoner = OptionalLocalReasoner(self.config)
+        self.reasoner.get_game_id = lambda: getattr(self, "game_id", "unknown")
         self.generator = CandidateGenerator(
             self.config,
             self.memory,
@@ -6130,7 +6133,6 @@ class MyAgent(Agent):
             reasoner_suppressed=self.controller.reasoner_suppressed,
             reasoner_suppression_reason=self.controller.reasoner_suppression_reason,
             llm_illegal_action_rejections=self.controller.reasoner.llm_illegal_action_rejections,
-            llm_repetitive_family_rejections=self.controller.reasoner.llm_repetitive_family_rejections,
             llm_repetitive_kind_rejections=self.controller.reasoner.llm_repetitive_kind_rejections,
             llm_empty_abduction_count=self.controller.reasoner.llm_empty_abduction_count,
             llm_parsed_abduction_count=self.controller.reasoner.llm_parsed_abduction_count,
