@@ -239,6 +239,12 @@ class Config:
     llm_programs_limit: int = _env_int("DEWMA_LLM_PROGRAMS_LIMIT", 3)
     llm_action_semantics_limit: int = _env_int("DEWMA_LLM_ACTION_SEMANTICS_LIMIT", 4)
 
+    llm_level_warmup_steps: int = _env_int("DEWMA_LLM_LEVEL_WARMUP_STEPS", 12)
+    llm_recent_transitions_limit: int = _env_int("DEWMA_LLM_RECENT_TRANSITIONS_LIMIT", 4)
+    llm_goals_limit: int = _env_int("DEWMA_LLM_GOALS_LIMIT", 3)
+    llm_programs_limit: int = _env_int("DEWMA_LLM_PROGRAMS_LIMIT", 3)
+    llm_action_semantics_limit: int = _env_int("DEWMA_LLM_ACTION_SEMANTICS_LIMIT", 4)
+
 
     trace_enabled: bool = _env_bool("DEWMA_TRACE_ENABLED", True)
     trace_to_disk: bool = _env_bool("DEWMA_TRACE_TO_DISK", True)
@@ -561,6 +567,7 @@ class DiagnosticTraceRecord:
     llm_empty_abduction_count: int = 0
     llm_parsed_abduction_count: int = 0
     llm_diversity_pruned_count: int = 0
+    llm_impossible_hypothesis_rejections: int = 0
     competing_hypothesis_count: int = 0
     stuck_mode_activations: int = 0
     action_semantics_summary: dict[str, Any] = field(default_factory=dict)
@@ -4817,6 +4824,33 @@ class OptionalLocalReasoner:
                             pass
         return None
 
+    def _is_impossible_hypothesis(self, scene: Scene, spec: dict) -> tuple[bool, str]:
+        params = spec.get("params", {})
+        if not isinstance(params, dict):
+            return False, ""
+            
+        color_counts = scene.color_counts
+        
+        # Color checks (must exist in current grid)
+        for key in ["source_color", "neighbor_color", "selector_color"]:
+            color = params.get(key)
+            if isinstance(color, int) and color >= 0 and color <= 9:
+                if color_counts.get(color, 0) == 0:
+                    return True, f"color {color} not found in grid"
+                    
+        # Background color check (optional, but if it's supposed to exist and it's the only one...)
+        # Usually background can be 0 even if it's completely filled, so skip background check.
+        
+        # Coordinate checks
+        x = params.get("x")
+        y = params.get("y")
+        if isinstance(x, int) and (x < 0 or x >= scene.grid.shape[1]):
+            return True, f"x={x} out of bounds"
+        if isinstance(y, int) and (y < 0 or y >= scene.grid.shape[0]):
+            return True, f"y={y} out of bounds"
+            
+        return False, ""
+
     @staticmethod
     def _json_safe(value: Any) -> Any:
         if isinstance(value, np.ndarray):
@@ -4951,7 +4985,7 @@ class OptionalLocalReasoner:
                     "signature": t.event.effect_signature,
                 },
             }
-            for t in list(memory.transitions)[-8:]
+            for t in list(memory.transitions)[-max(1, self.config.llm_recent_transitions_limit):]
         ]
         
         controlled_shift = {"status": "unknown"}
@@ -4995,9 +5029,9 @@ class OptionalLocalReasoner:
             f"mechanism_snapshot={inspector.mechanism_snapshot(recent, controlled_shift)}\n"
             f"entity_confidence={scene.entity_confidence:.3f}, field_mode={scene.field_mode}\n"
             f"recent_transitions={json.dumps(recent, separators=(',', ':'))}\n"
-            f"candidate_goals={json.dumps(list(goals_summary), separators=(',', ':'), default=str)}\n"
-            f"verified_programs={json.dumps(list(programs_summary), separators=(',', ':'), default=str)}\n"
-            f"action_semantics={json.dumps(list(action_semantics_summary), separators=(',', ':'), default=str)}\n"
+            f"candidate_goals={json.dumps(list(goals_summary)[:self.config.llm_goals_limit], separators=(',', ':'), default=str)}\n"
+            f"verified_programs={json.dumps(list(programs_summary)[:self.config.llm_programs_limit], separators=(',', ':'), default=str)}\n"
+            f"action_semantics={json.dumps(list(action_semantics_summary)[:self.config.llm_action_semantics_limit], separators=(',', ':'), default=str)}\n"
             "Examples of Optional Program Hypotheses (add inside suggested_programs):\n"
             "- Relational / Mechanism Inference: {\"kind\":\"conditional_recolor\",\"action\":\"ACTION1\",\"params\":{\"source_color\":2,\"target_color\":3,\"neighbor_color\":4}}\n"
             "- Object Manipulation (Delete): {\"kind\":\"component_delete\",\"action\":\"ACTION2\",\"params\":{\"background\":0,\"clicked_color\":-1}}\n"
@@ -5084,6 +5118,13 @@ class OptionalLocalReasoner:
                 for prop in proposals_data:
                     if not isinstance(prop, dict):
                         continue
+                    
+                    is_impossible, reason = self._is_impossible_hypothesis(scene, prop)
+                    if is_impossible:
+                        self.llm_impossible_hypothesis_rejections += 1
+                        history_str += f"abduction_error=impossible_hypothesis_rejected ({reason})\n"
+                        continue
+
                     name = str(prop.get("action", "")).upper()
                     data: tuple[tuple[str, int], ...] = ()
                     if prop.get("x") is not None or prop.get("y") is not None:
@@ -6577,6 +6618,7 @@ class MyAgent(Agent):
             llm_empty_abduction_count=self.controller.reasoner.llm_empty_abduction_count,
             llm_parsed_abduction_count=self.controller.reasoner.llm_parsed_abduction_count,
             llm_diversity_pruned_count=self.controller.reasoner.llm_diversity_pruned_count,
+            llm_impossible_hypothesis_rejections=self.controller.reasoner.llm_impossible_hypothesis_rejections,
             competing_hypothesis_count=int(self.pending_reasoning.get("competing_hypothesis_count", 0)),
             stuck_mode_activations=self.controller.stuck_mode_activations,
             action_semantics_summary=dict(self.pending_reasoning.get("action_semantics", {})) if isinstance(self.pending_reasoning.get("action_semantics", {}), dict) else {"rows": self.pending_reasoning.get("action_semantics", [])},
@@ -6820,6 +6862,7 @@ class MyAgent(Agent):
             "reasoner_decision_skips_by_reason": self.reasoner.reasoner_decision_skips_by_reason,
             "reasoner_decision_successes": self.reasoner.reasoner_decision_successes,
             "reasoner_consultations_this_level": self.reasoner.reasoner_consultations_this_level,
+            "llm_impossible_hypothesis_rejections": self.reasoner.llm_impossible_hypothesis_rejections,
             "competing_hypothesis_count": sum(
                 1
                 for g in self.goals.active(4)
