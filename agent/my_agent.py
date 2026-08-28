@@ -584,6 +584,14 @@ class DiagnosticTraceRecord:
     llm_semantic_override_used: bool = False
     llm_semantic_override_rejections: int = 0
     llm_breakout_used_this_step: bool = False
+    llm_override_eligible: bool = False
+    llm_override_block_reason: str = ""
+    llm_severe_stagnation_signal: str = ""
+    llm_follow_through_active: bool = False
+    llm_follow_through_family: str = ""
+    llm_promoted_programs_count: int = 0
+    churn_stagnation_detected: bool = False
+    llm_top_productive_family: str = ""
     action_semantics_summary: dict[str, Any] = field(default_factory=dict)
 
 
@@ -1858,6 +1866,13 @@ class TraceMemory:
         self.spatial_visits: dict[tuple[int, int], int] = defaultdict(int)
         self.spatial_visits_by_action: dict[tuple[str, int, int], int] = defaultdict(int)
         self.escape_hatch_used = False
+        self.llm_family_payoff: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+        self.llm_follow_through_window: int = 0
+        self.llm_follow_through_family: str = ""
+        self.llm_follow_through_coords: tuple[int, int] | None = None
+        self.llm_recent_committed_family: str = ""
+        self.llm_family_cooldown: dict[str, int] = defaultdict(int)
+        self.llm_promoted_program_ids: set[str] = set()
 
     def reset_level(self) -> None:
         self.transitions.clear()
@@ -1870,6 +1885,12 @@ class TraceMemory:
         self.spatial_visits.clear()
         self.spatial_visits_by_action.clear()
         self.escape_hatch_used = False
+        self.llm_follow_through_window = 0
+        self.llm_follow_through_family = ""
+        self.llm_follow_through_coords = None
+        self.llm_recent_committed_family = ""
+        self.llm_family_cooldown.clear()
+        self.llm_promoted_program_ids.clear()
 
     def reset_attempt(self) -> None:
         # Preserve learned transitions, state-action counts, global outcomes, and
@@ -5884,6 +5905,23 @@ class MetacognitiveController:
             return None
         return self.programs.predict_grid(scene.grid, spec, scene)
 
+    def _check_severe_stagnation(self) -> tuple[bool, str]:
+        if self.steps_since_progress >= 30:
+            return True, "steps_since_progress"
+        if self.memory.no_op_streak >= 12:
+            return True, "no_op_streak"
+        repeated = self.memory.repeated_effect_signature(window=8)
+        if repeated is not None and repeated[1] >= 4:
+            return True, "repeated_effect_signature"
+        if self.counterfactual_fallback_streak >= 20:
+            return True, "counterfactual_fallback_streak"
+        if self.fallback_loop_streak >= 20:
+            return True, "fallback_loop_streak"
+        # Progressless churn signal: moving/changing without solving
+        if self.steps_since_progress >= 25 and self.memory.no_op_streak == 0 and repeated is not None and repeated[1] >= 3:
+            return True, "progressless_churn"
+        return False, ""
+
     def _verify(
         self,
         scene: Scene,
@@ -6082,6 +6120,50 @@ class MetacognitiveController:
         candidates = self.candidate_generator.generate(
             scene, legal_actions, use_hypotheses=profile.use_hypotheses)
         action_semantics_summary = self.path_planner.dynamics.summary_for_prompt(legal_names)
+
+        # 2b-2) Post-Breakout Follow-Through Mode (Exploit LLM insight window)
+        if self.memory.llm_follow_through_window > 0:
+            ft_family = self.memory.llm_follow_through_family
+            ft_coords = self.memory.llm_follow_through_coords
+            ft_programs = self.memory.llm_promoted_program_ids
+            ft_candidates = []
+            for candidate in candidates:
+                prediction = self._predict(scene, candidate.spec, profile)
+                decision = self._verify(scene, candidate.spec, legal_names, prediction, False, profile)
+                if not decision.allowed or self.dead.is_dead(candidate.signature):
+                    continue
+                ft_score = candidate.score + decision.score
+                if prediction is not None and prediction.kind == ft_family:
+                    ft_score += 0.5
+                if prediction is not None and prediction.program_id in ft_programs:
+                    ft_score += 0.6
+                if ft_coords and candidate.spec.data:
+                    cx, cy = candidate.spec.data_dict.get("x"), candidate.spec.data_dict.get("y")
+                    if cx is not None and cy is not None:
+                        dist = max(abs(cx - ft_coords[0]), abs(cy - ft_coords[1]))
+                        if dist <= 2:
+                            ft_score += 0.4
+                        elif cx == ft_coords[0] or cy == ft_coords[1]:
+                            ft_score += 0.2
+                ft_candidates.append((ft_score, candidate, decision, prediction))
+            if ft_candidates:
+                ft_candidates.sort(key=lambda row: row[0], reverse=True)
+                score, best, decision, prediction = ft_candidates[0]
+                spec = ActionSpec(
+                    name=best.spec.name, data=best.spec.data, source="llm_follow_through",
+                    predicted_effect=best.spec.predicted_effect if prediction is None else prediction.expected_effect,
+                    score=score,
+                    program_id=None if prediction is None else prediction.program_id,
+                    goal_ids=decision.goal_ids,
+                )
+                return spec, False, {
+                    "stage": "llm_follow_through",
+                    "final_action_source": "llm_follow_through",
+                    "follow_through_family": ft_family,
+                    "follow_through_window": self.memory.llm_follow_through_window,
+                    "score": round(score, 3),
+                    **self.llm_step_meta
+                }
 
         # 2c) Evidence-Guided Novelty Explorer
         repeated_effect = self.memory.repeated_effect_signature()
@@ -6424,6 +6506,12 @@ class MetacognitiveController:
                                 prior_kind = proposal.program_spec.get("kind") if proposal.program_spec else None
                                 semantic_prior, semantic_reasons = self.path_planner.dynamics.prior_for_action(
                                     model_action.name, prior_kind)
+                                # Modest translation bonus during stagnation
+                                if prior_kind == "translation" and is_severe_stagnation:
+                                    semantic_prior += 0.6
+                                # Family cooldown penalty if family repeatedly failed
+                                if prior_kind and self.memory.llm_family_cooldown.get(prior_kind, 0) >= 2:
+                                    semantic_prior -= 0.8
                                 if model_action.name not in legal_names:
                                     self.reasoner.llm_illegal_action_rejections += 1
                                     self.reasoner.llm_filtered_for_action_mismatch += 1
@@ -6440,11 +6528,22 @@ class MetacognitiveController:
                                 is_probe = self.memory.tried_count(
                                     scene.exact_key, model_action) == 0
                                 prediction = self._predict(scene, model_action, profile)
-                                is_severe_stagnation = self.memory.no_op_streak >= 25
+                                is_severe_stagnation, stagnation_signal = self._check_severe_stagnation()
+                                is_dead_sig = self.dead.is_dead(signature)
+                                
+                                self.llm_step_meta["llm_override_eligible"] = is_severe_stagnation
+                                self.llm_step_meta["llm_severe_stagnation_signal"] = stagnation_signal
+                                
+                                if not is_severe_stagnation:
+                                    self.llm_step_meta["llm_override_block_reason"] = "not_stagnant"
+                                elif self.memory.escape_hatch_used:
+                                    self.llm_step_meta["llm_override_block_reason"] = "budget_exhausted"
+                                elif is_dead_sig:
+                                    self.llm_step_meta["llm_override_block_reason"] = "dead_signature"
+
                                 decision = self._verify(
                                     scene, model_action, legal_names, prediction, is_probe, profile, is_severe_stagnation=is_severe_stagnation, is_llm_proposal=True)
                                 
-                                is_dead_sig = self.dead.is_dead(signature)
                                 is_probe_exhausted = is_probe and self.memory.probes_this_level >= self.config.max_physical_probes_per_level
                                 
                                 allowed = decision.allowed
@@ -6452,10 +6551,21 @@ class MetacognitiveController:
                                     self.reasoner.llm_semantic_override_attempts += 1
                                     
                                 if not allowed and is_severe_stagnation and not self.memory.escape_hatch_used and not is_dead_sig:
-                                    if decision.score >= -6.0 and "illegal_action" not in decision.reasons and "incomplete_coordinates" not in decision.reasons and "coordinate_out_of_bounds" not in decision.reasons:
+                                    non_negotiable = [r for r in decision.reasons if r in ("illegal_action", "incomplete_coordinates", "coordinate_out_of_bounds", "semantic_gating_high_death_context", "coordinate_fatigue")]
+                                    if decision.score >= -6.0 and not non_negotiable:
                                         allowed = True
                                         self.memory.escape_hatch_used = True
                                         decision = AlignmentDecision(True, decision.score, decision.goal_delta, decision.risk, decision.goal_ids, decision.reasons + ("escape_hatch_override",))
+                                        self.llm_step_meta["llm_override_block_reason"] = ""
+                                    else:
+                                        if non_negotiable:
+                                            self.llm_step_meta["llm_override_block_reason"] = non_negotiable[0]
+                                        else:
+                                            self.llm_step_meta["llm_override_block_reason"] = "score_too_low"
+                                            
+                                if allowed and is_severe_stagnation and self.llm_step_meta.get("llm_override_block_reason") not in ("budget_exhausted", "dead_signature"):
+                                    if "escape_hatch_override" not in decision.reasons:
+                                        self.llm_step_meta["llm_override_block_reason"] = "no_override_needed"
                                 
                                 if allowed and "semantic_override_penalty" in decision.reasons:
                                     self.llm_step_meta["llm_semantic_override_used"] = True
@@ -6501,10 +6611,13 @@ class MetacognitiveController:
                                             goal_ids=decision.goal_ids,
                                         )
                                         best_is_probe = is_probe
+                                        fam_name = prior_kind or "translation"
+                                        self.memory.llm_recent_committed_family = fam_name
                                         best_meta = {
                                             "stage": "milestone_model_goal_verified" if profile.use_alignment else "milestone_model_verified",
                                             "final_action_source": "llm_probe" if is_probe else "llm_program",
                                             "final_action_from_llm": True,
+                                            "llm_family": fam_name,
                                             "alignment": round(decision.score, 3),
                                             "semantic_prior": round(semantic_prior, 3),
                                             "semantic_reasons": semantic_reasons[:3],
@@ -6811,6 +6924,28 @@ class MyAgent(Agent):
         profile = _runtime_profile(pending_tier, self.config)
         self.memory.record(transition, self.pending_was_probe)
         self.dead.record(self.pending_signature, event)
+        # LLM Family Payoff & Follow-Through Window Update
+        if self.pending_reasoning.get("final_action_from_llm"):
+            fam = self.pending_reasoning.get("llm_family") or self.memory.llm_recent_committed_family or "unspecified"
+            self.memory.llm_family_payoff[fam]["committed"] += 1
+            if not event.no_op and not event.game_over:
+                self.memory.llm_family_payoff[fam]["changed"] += 1
+                self.memory.llm_follow_through_window = 3
+                self.memory.llm_follow_through_family = fam
+                p_data = self.pending_action.data_dict
+                if "x" in p_data and "y" in p_data:
+                    self.memory.llm_follow_through_coords = (p_data["x"], p_data["y"])
+                self.memory.llm_family_cooldown[fam] = 0
+                if profile.use_programs:
+                    recent_progs = [p.program_id for p in self.programs.programs if p.kind == fam]
+                    self.memory.llm_promoted_program_ids = set(recent_progs[:5])
+            else:
+                self.memory.llm_family_cooldown[fam] += 1
+                self.memory.llm_follow_through_window = 0
+            if event.level_delta > 0 or event.win:
+                self.memory.llm_family_payoff[fam]["progress"] += 1
+        else:
+            self.memory.llm_follow_through_window = max(0, self.memory.llm_follow_through_window - 1)
         if profile.learn_hypotheses:
             self.hypotheses.record(self.pending_signature, event)
         self.world_model.record(transition)
@@ -6908,6 +7043,14 @@ class MyAgent(Agent):
             llm_semantic_override_used=self.controller.llm_step_meta.get("llm_semantic_override_used", False),
             llm_semantic_override_rejections=self.controller.reasoner.llm_semantic_override_rejections,
             llm_breakout_used_this_step=self.controller.llm_step_meta.get("llm_breakout_used_this_step", False),
+            llm_override_eligible=self.controller.llm_step_meta.get("llm_override_eligible", False),
+            llm_override_block_reason=self.controller.llm_step_meta.get("llm_override_block_reason", ""),
+            llm_severe_stagnation_signal=self.controller.llm_step_meta.get("llm_severe_stagnation_signal", ""),
+            llm_follow_through_active=self.controller.memory.llm_follow_through_window > 0,
+            llm_follow_through_family=self.controller.memory.llm_follow_through_family,
+            llm_promoted_programs_count=len(self.controller.memory.llm_promoted_program_ids),
+            churn_stagnation_detected=self.controller.llm_step_meta.get("llm_severe_stagnation_signal") == "progressless_churn",
+            llm_top_productive_family=max(self.controller.memory.llm_family_payoff.items(), key=lambda x: x[1].get("changed", 0))[0] if self.controller.memory.llm_family_payoff else "",
             reasoner_consulted_this_step=bool(self.pending_reasoning.get("reasoner_consulted_this_step", False)),
             reasoner_parsed_abduction_this_step=bool(self.pending_reasoning.get("reasoner_parsed_abduction_this_step", False)),
             reasoner_surviving_proposals_this_step=int(self.pending_reasoning.get("reasoner_surviving_proposals_this_step", 0)),
@@ -7125,6 +7268,13 @@ class MyAgent(Agent):
             "llm_semantic_override_used": self.controller.llm_step_meta.get("llm_semantic_override_used", False),
             "llm_semantic_override_rejections": self.reasoner.llm_semantic_override_rejections,
             "llm_breakout_used_this_step": self.controller.llm_step_meta.get("llm_breakout_used_this_step", False),
+            "llm_override_eligible": self.controller.llm_step_meta.get("llm_override_eligible", False),
+            "llm_override_block_reason": self.controller.llm_step_meta.get("llm_override_block_reason", ""),
+            "llm_severe_stagnation_signal": self.controller.llm_step_meta.get("llm_severe_stagnation_signal", ""),
+            "llm_follow_through_active": self.controller.memory.llm_follow_through_window > 0,
+            "llm_follow_through_family": self.controller.memory.llm_follow_through_family,
+            "llm_promoted_programs_count": len(self.controller.memory.llm_promoted_program_ids),
+            "churn_stagnation_detected": self.controller.llm_step_meta.get("llm_severe_stagnation_signal") == "progressless_churn",
             "predicted": spec.predicted_effect,
             "program_id": spec.program_id,
             "predicted_state": spec.predicted_state_key,
