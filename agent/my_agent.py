@@ -4704,6 +4704,11 @@ class OptionalLocalReasoner:
         self.llm_schema_valid_but_unexecutable = 0
         self.llm_filtered_for_action_mismatch = 0
         self.recent_abductions: list[tuple[str, str]] = []
+        self.recent_mismatch_rejections: deque[str] = deque(maxlen=5)
+        self.recent_impossible_rejections: deque[str] = deque(maxlen=5)
+        self.recent_family_repeat_rejections: deque[str] = deque(maxlen=5)
+        self.recent_schema_rejections: deque[str] = deque(maxlen=5)
+        self.failed_verifications: dict[tuple[str, str], int] = {}
 
     @property
     def model_ready(self) -> bool:
@@ -4734,6 +4739,12 @@ class OptionalLocalReasoner:
         self.llm_abduction_prior_shift_progress = 0
         self.model_decisions_used_this_level = 0
         self.reasoner_consultations_this_level = 0
+        self.failed_verifications.clear()
+        self.recent_mismatch_rejections.clear()
+        self.recent_impossible_rejections.clear()
+        self.recent_family_repeat_rejections.clear()
+        self.recent_schema_rejections.clear()
+        self.recent_abductions.clear()
 
     def _load(self) -> bool:
         if self._model is not None:
@@ -4834,7 +4845,7 @@ class OptionalLocalReasoner:
         # Color checks (must exist in current grid)
         for key in ["source_color", "neighbor_color", "selector_color"]:
             color = params.get(key)
-            if isinstance(color, int) and 0 <= color <= 9:
+            if isinstance(color, int) and 0 <= color <= 15:
                 if color_counts.get(color, 0) == 0:
                     return True, f"color {color} not found in grid"
                     
@@ -5061,9 +5072,21 @@ class OptionalLocalReasoner:
             else:
                 instruction = "MANDATORY: You have already inspected the state. You MUST now propose an abduction hypothesis using the final abduction schema.\n"
 
+            dyn_hint_parts = []
+            if len(self.recent_mismatch_rejections) > 0:
+                dyn_hint_parts.append("recent proposals failed legality/action-family matching (e.g. recent recolor hypotheses mismatched movement-like effects or invalid topology)")
+            if len(self.recent_impossible_rejections) > 0:
+                dyn_hint_parts.append("hypotheses referenced colors/objects not present in the scene")
+            if len(self.recent_family_repeat_rejections) > 0:
+                dyn_hint_parts.append("repeated same hypothesis pattern without progress (diversify beyond simple recolor!)")
+            if len(self.recent_schema_rejections) > 0:
+                dyn_hint_parts.append("proposed actions lacked required parameters (e.g. missing coordinates for ACTION6)")
+            if self.reasoner_decision_successes > 0 and getattr(memory, "no_op_streak", 0) >= 2:
+                dyn_hint_parts.append("recent accepted proposals produced no progress (reevaluate the mechanism!)")
+            
             dyn_hint = ""
-            if self.llm_impossible_hypothesis_rejections > 0 or self.llm_repetitive_kind_rejections > 0:
-                dyn_hint = "HINT: Recent proposals encountered rejections. Ensure referenced colors exist in the scene and diversify hypothesis families beyond simple recolor.\n"
+            if dyn_hint_parts:
+                dyn_hint = f"HINT: Recent proposals failed because: {'; '.join(dyn_hint_parts)}. Analyze recent_transitions carefully to fix this.\n"
             prompt = system_context + dyn_hint + instruction + history_str
             obj = self._generate_json(prompt, step)
             if not obj:
@@ -5142,12 +5165,14 @@ class OptionalLocalReasoner:
                     is_impossible, reason = self._is_impossible_hypothesis(scene, prop)
                     if is_impossible:
                         self.llm_impossible_hypothesis_rejections += 1
+                        self.recent_impossible_rejections.append(reason)
                         history_str += f"abduction_error=impossible_hypothesis_rejected ({reason})\n"
                         continue
 
                     name = str(prop.get("action", "")).upper()
                     if not name:
                         self.llm_schema_valid_but_unexecutable += 1
+                        self.recent_schema_rejections.append("missing_action_name")
                         history_str += "abduction_error=missing_action_name\n"
                         continue
                     data: tuple[tuple[str, int], ...] = ()
@@ -5784,6 +5809,7 @@ class MetacognitiveController:
         self.reasoner_suppression_reason = ""
         self.stuck_mode_activations = 0
         self.stagnation_override_count_this_level = 0
+        self.llm_step_meta: dict[str, Any] = {}
 
     def reset_level(self) -> None:
         self.plan_queue.clear()
@@ -5845,8 +5871,6 @@ class MetacognitiveController:
         is_probe: bool,
         profile: RuntimeProfile,
     ) -> AlignmentDecision:
-        if profile.use_alignment:
-            return self.alignment.verify(scene, spec, legal_names, prediction, is_probe)
         if spec.name not in legal_names:
             return AlignmentDecision(False, -10.0, -1.0, 1.0, (), ("illegal_action",))
         data = spec.data_dict
@@ -5854,6 +5878,40 @@ class MetacognitiveController:
             return AlignmentDecision(False, -10.0, -1.0, 1.0, (), ("incomplete_coordinates",))
         if "x" in data and not (0 <= data["x"] < scene.width and 0 <= data["y"] < scene.height):
             return AlignmentDecision(False, -10.0, -1.0, 1.0, (), ("coordinate_out_of_bounds",))
+            
+        action_stats = self.path_planner.dynamics.action_stats.get(spec.name, Counter())
+        observed = action_stats.get("observed", 0)
+        
+        base_decision = None
+        if profile.use_alignment:
+            base_decision = self.alignment.verify(scene, spec, legal_names, prediction, is_probe)
+            if not base_decision.allowed:
+                return base_decision
+                
+        # Semantic Hard-Gating
+        if observed >= 5:
+            is_movement_hypothesis = prediction is not None and prediction.kind in ("translation", "gravity", "drag_component")
+            is_recolor_hypothesis = prediction is not None and prediction.kind in ("conditional_recolor", "component_recolor")
+            
+            if is_movement_hypothesis and action_stats.get("movement_like", 0) == 0:
+                return AlignmentDecision(False, -10.0, -1.0, 1.0, (), ("semantic_gating_not_movement_capable",))
+                
+            if is_recolor_hypothesis and action_stats.get("movement_like", 0) > observed * 0.5:
+                # Down-rank significantly
+                if base_decision is not None:
+                    base_decision = AlignmentDecision(base_decision.allowed, base_decision.score - 5.0, base_decision.goal_delta, base_decision.risk, base_decision.goal_ids, base_decision.reasons + ("semantic_gating_movement_penalty",))
+                else:
+                    return AlignmentDecision(False, -5.0, -1.0, 1.0, (), ("semantic_gating_movement_penalty",))
+                    
+            if action_stats.get("death", 0) >= max(3, observed * 0.4):
+                if "x" in data and "y" in data:
+                    visits = self.memory.spatial_visits.get((data["x"], data["y"]), 0)
+                    if visits >= 2:
+                        return AlignmentDecision(False, -10.0, -1.0, 1.0, (), ("semantic_gating_high_death_context",))
+
+        if base_decision is not None:
+            return base_decision
+            
         return AlignmentDecision(True, 0.0, 0.0, 0.0, (), ("tier_alignment_bypass",))
 
     def _aligned_known_candidate(
@@ -5893,6 +5951,12 @@ class MetacognitiveController:
         self.last_response_frames = tuple(response_frames)
         self.reasoner_suppressed = False
         self.reasoner_suppression_reason = ""
+        self.llm_step_meta = {
+            "reasoner_consulted_this_step": False,
+            "reasoner_parsed_abduction_this_step": False,
+            "reasoner_surviving_proposals_this_step": 0,
+            "stagnation_override_used": False,
+        }
         
         if not profile.use_programs:
             self.plan_queue.clear()
@@ -5955,7 +6019,7 @@ class MetacognitiveController:
             scene, legal_actions, use_hypotheses=profile.use_hypotheses)
         action_semantics_summary = self.path_planner.dynamics.summary_for_prompt(legal_names)
 
-        # 2c) Stronger stuck-mode exploration once we have evidence of churn without progress.
+        # 2c) Evidence-Guided Novelty Explorer
         repeated_effect = self.memory.repeated_effect_signature()
         if (
             self.steps_since_progress >= max(18, self.config.no_progress_exhaustion_threshold)
@@ -5971,22 +6035,49 @@ class MetacognitiveController:
                     scene, candidate.spec, legal_names, prediction, True, profile)
                 if not decision.allowed:
                     continue
+                
+                evidence_score = 0.0
+                action_stats = self.path_planner.dynamics.action_stats.get(candidate.spec.name, Counter())
+                observed = max(1, action_stats.get("observed", 0))
+                
+                # Base exploration value for less-used actions
+                evidence_score += 2.0 / observed
+                
+                # Reward historical topology/movement behavior
+                if action_stats.get("topology", 0) > 0:
+                    evidence_score += 1.5
+                if action_stats.get("movement_like", 0) > 0:
+                    evidence_score += 1.0
+                    
+                # Heavy penalty for repeating recent patterns
+                if candidate.spec.name in recent_actions:
+                    evidence_score -= 1.5
+                    
+                # Penalize exact predicted effect repetition
+                if prediction is not None:
+                    eff_count = self.path_planner.dynamics.effect_signatures[candidate.spec.name].get(prediction.expected_effect, 0)
+                    evidence_score -= (eff_count * 0.5)
+                    if repeated_sig and prediction.expected_effect == repeated_sig:
+                        evidence_score -= 3.0
+                    
+                    # Reward predicted structural changes
+                    if prediction.grid.shape != scene.grid.shape:
+                        evidence_score += 2.0
+                
+                # Penalize repeated local patch hash usage
                 visits_penalty = 0.0
                 if candidate.spec.data:
                     data_dict = dict(candidate.spec.data)
                     x, y = data_dict.get("x"), data_dict.get("y")
                     if x is not None and y is not None:
                         visits_penalty = float(self.memory.spatial_visits.get((x, y), 0))
-                action_stats = self.path_planner.dynamics.action_stats.get(candidate.spec.name, Counter())
-                observed = max(1, action_stats.get("observed", 0))
-                novelty = 2.0 / observed
-                if candidate.spec.name not in recent_actions:
-                    novelty += 0.9
-                if repeated_sig and prediction is not None and prediction.expected_effect == repeated_sig:
-                    novelty -= 0.7
+                
+                evidence_score -= 0.5 * visits_penalty
+
                 if self.dead.is_dead(candidate.signature):
-                    novelty -= 1.0
-                exploratory.append((novelty - 0.20 * visits_penalty + decision.score, candidate, decision))
+                    evidence_score -= 2.0
+                    
+                exploratory.append((evidence_score + decision.score, candidate, decision))
             if exploratory:
                 exploratory.sort(key=lambda row: row[0], reverse=True)
                 score, best, decision = exploratory[0]
@@ -6198,8 +6289,8 @@ class MetacognitiveController:
                 self.reasoner.model_decisions_used_this_level += 1
                 self.reasoner.reasoner_consultations_this_level += 1
                 
-                consulted_this_step = True
-                parsed_abduction_this_step = False
+                self.llm_step_meta["reasoner_consulted_this_step"] = True
+                self.llm_step_meta["stagnation_override_used"] = stagnation_override_active
                 surviving_proposals_this_step = 0
                 for refinement_round in range(3):
                     proposals = self.reasoner.propose(
@@ -6212,7 +6303,7 @@ class MetacognitiveController:
                         bypass_can_call=True,
                     )
                     if proposals is not None:
-                        parsed_abduction_this_step = True
+                        self.llm_step_meta["reasoner_parsed_abduction_this_step"] = True
                         self.reasoner.llm_parsed_abduction_count += 1
                         best_spec = None
                         best_is_probe = False
@@ -6224,12 +6315,22 @@ class MetacognitiveController:
                         for proposal in proposals:
                             fam = proposal.puzzle_family or "none"
                             kind = proposal.program_spec.get("kind", "none") if proposal.program_spec else "none"
+                            
+                            # Check hypothesis retirement
+                            model_action = proposal.action
+                            if fam != "none" and model_action is not None:
+                                pair_key = (fam, model_action.name)
+                                if self.reasoner.failed_verifications.get(pair_key, 0) >= 3:
+                                    failed_summaries.append(f"Skipping family/action pair {pair_key} due to repeated verification failures in this level.")
+                                    continue
+                            
                             if fam != "none" or kind != "none":
                                 recent = self.reasoner.recent_abductions
                                 pair = (fam, kind)
                                 if recent.count(pair) >= 3:
                                     self.reasoner.llm_repetitive_kind_rejections += 1
                                     self.reasoner.llm_family_repeat_rejections += 1
+                                    self.reasoner.recent_family_repeat_rejections.append(str(pair))
                                     failed_summaries.append(f"Skipping heavily repeated pattern {pair} without progress.")
                                     continue
                                 recent.append(pair)
@@ -6251,11 +6352,13 @@ class MetacognitiveController:
                                 if model_action.name not in legal_names:
                                     self.reasoner.llm_illegal_action_rejections += 1
                                     self.reasoner.llm_filtered_for_action_mismatch += 1
+                                    self.reasoner.recent_mismatch_rejections.append(model_action.name)
                                     failed_summaries.append(f"Action {model_action.name} is not a valid legal action.")
                                     continue
                                 if model_action.name == "ACTION6" and not ("x" in model_action.data_dict and "y" in model_action.data_dict):
                                     self.reasoner.llm_illegal_action_rejections += 1
                                     self.reasoner.llm_schema_valid_but_unexecutable += 1
+                                    self.reasoner.recent_schema_rejections.append("missing_coordinates")
                                     failed_summaries.append("ACTION6 requires coordinates but none provided.")
                                     continue
                                 signature = _action_signature(scene, model_action)
@@ -6270,7 +6373,12 @@ class MetacognitiveController:
                                     and (not is_probe or self.memory.probes_this_level < self.config.max_physical_probes_per_level)
                                 ):
                                     surviving_proposals_this_step += 1
+                                    self.llm_step_meta["reasoner_surviving_proposals_this_step"] = surviving_proposals_this_step
                                     self.last_model_milestone = milestone_name
+                                    
+                                    if fam != "none":
+                                        self.reasoner.failed_verifications.pop((fam, model_action.name), None)
+                                        
                                     score = model_action.score + decision.score + semantic_prior
                                     if score > best_score:
                                         best_score = score
@@ -6288,14 +6396,11 @@ class MetacognitiveController:
                                             "stage": "milestone_model_goal_verified" if profile.use_alignment else "milestone_model_verified",
                                             "final_action_source": "llm_probe" if is_probe else "llm_program",
                                             "final_action_from_llm": True,
-                                            "reasoner_consulted_this_step": True,
-                                            "reasoner_parsed_abduction_this_step": True,
-                                            "reasoner_surviving_proposals_this_step": surviving_proposals_this_step,
-                                            "stagnation_override_used": stagnation_override_active,
-                                            "milestone": milestone_name,
                                             "alignment": round(decision.score, 3),
                                             "semantic_prior": round(semantic_prior, 3),
                                             "semantic_reasons": semantic_reasons[:3],
+                                            "milestone": milestone_name,
+                                            **self.llm_step_meta
                                         }
                                 else:
                                     if proposal.program_spec is not None:
@@ -6303,10 +6408,13 @@ class MetacognitiveController:
                                         failed_summaries.append(f"Program kind '{kind}' resulted in verification score {round(decision.score, 2)}")
                                     else:
                                         failed_summaries.append(f"Action {model_action.name} resulted in verification score {round(decision.score, 2)}")
+                                        
+                                    if fam != "none":
+                                        pair_key = (fam, model_action.name)
+                                        self.reasoner.failed_verifications[pair_key] = self.reasoner.failed_verifications.get(pair_key, 0) + 1
                         
                         if best_spec is not None:
                             # Smarter failed consultation reset: reset backoff and lock state on successful model proposal.
-                            best_meta["reasoner_surviving_proposals_this_step"] = surviving_proposals_this_step
                             self.reasoner.reasoner_decision_successes += 1
                             self.failed_consultations_this_level = 0
                             self.recent_lock_skip_count = 0
@@ -6653,16 +6761,14 @@ class MyAgent(Agent):
             death=event.game_over,
             progress=bool(event.level_delta > 0 or event.win),
             physical_probe=self.pending_was_probe,
-            model_called=bool(self.pending_reasoning.get(
-                "stage", "").startswith("milestone_model")),
+            model_called=bool(self.pending_reasoning.get("model_called", False)),
             local_patch_hash=local_patch_hash,
             active_goal_ids=active_goals,
             program_ids=verified_program_ids,
             representation_mode=representation_mode,
             representation_confidence=scene.entity_confidence,
             entity_deltas=self._diagnostic_entity_deltas(event),
-            model_latency_sec=self.reasoner.last_latency_sec if self.pending_reasoning.get(
-                "stage", "").startswith("milestone_model") else 0.0,
+            model_latency_sec=self.reasoner.last_latency_sec if self.pending_reasoning.get("model_called", False) else 0.0,
             deterministic_latency_sec=self.pending_decision_latency_sec,
             remaining_wall_time_sec=self.runtime.remaining_sec(),
             runtime_tier=str(self.pending_reasoning.get(
@@ -6894,15 +7000,12 @@ class MyAgent(Agent):
         self.last_state = latest_frame.state
 
         reasoning: dict[str, Any] = {
+            **self.controller.llm_step_meta,
             **decision,
             "source": spec.source,
             "final_action_source": decision.get("final_action_source", spec.source),
             "final_action_from_llm": decision.get("final_action_from_llm", False),
-            "reasoner_consulted_this_step": decision.get("reasoner_consulted_this_step", False),
-            "reasoner_parsed_abduction_this_step": decision.get("reasoner_parsed_abduction_this_step", False),
-            "reasoner_surviving_proposals_this_step": decision.get("reasoner_surviving_proposals_this_step", 0),
-            "stagnation_override_used": decision.get("stagnation_override_used", False),
-            "model_called": decision.get("reasoner_consulted_this_step", False),
+            "model_called": decision.get("reasoner_consulted_this_step", self.controller.llm_step_meta.get("reasoner_consulted_this_step", False)),
             "predicted": spec.predicted_effect,
             "program_id": spec.program_id,
             "predicted_state": spec.predicted_state_key,
