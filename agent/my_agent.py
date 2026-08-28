@@ -593,7 +593,7 @@ class DiagnosticTraceRecord:
     churn_stagnation_detected: bool = False
     llm_top_productive_family: str = ""
     llm_top_unproductive_family: str = ""
-    llm_family_payoff_summary: dict[str, int] = field(default_factory=dict)
+    llm_family_payoff_summary: dict[str, Any] = field(default_factory=dict)
     action_semantics_summary: dict[str, Any] = field(default_factory=dict)
 
 
@@ -7054,7 +7054,16 @@ class MyAgent(Agent):
             churn_stagnation_detected=self.controller.llm_step_meta.get("llm_severe_stagnation_signal") == "progressless_churn",
             llm_top_productive_family=max(self.controller.memory.llm_family_payoff.items(), key=lambda x: x[1].get("changed", 0))[0] if self.controller.memory.llm_family_payoff else "",
             llm_top_unproductive_family=max(self.controller.memory.llm_family_payoff.items(), key=lambda x: (x[1].get("noop", 0) + x[1].get("death", 0)))[0] if self.controller.memory.llm_family_payoff else "",
-            llm_family_payoff_summary={fam: data.get("changed", 0) - data.get("noop", 0) for fam, data in self.controller.memory.llm_family_payoff.items()},
+            llm_family_payoff_summary={
+                fam: {
+                    "changed": data.get("changed", 0),
+                    "progress": data.get("progress", 0),
+                    "noop": data.get("noop", 0),
+                    "death": data.get("death", 0),
+                    "score": data.get("changed", 0) + 3 * data.get("progress", 0) - data.get("noop", 0) - 2 * data.get("death", 0),
+                }
+                for fam, data in self.controller.memory.llm_family_payoff.items()
+            },
             reasoner_consulted_this_step=bool(self.pending_reasoning.get("reasoner_consulted_this_step", False)),
             reasoner_parsed_abduction_this_step=bool(self.pending_reasoning.get("reasoner_parsed_abduction_this_step", False)),
             reasoner_surviving_proposals_this_step=int(self.pending_reasoning.get("reasoner_surviving_proposals_this_step", 0)),
@@ -7281,7 +7290,16 @@ class MyAgent(Agent):
             "churn_stagnation_detected": self.controller.llm_step_meta.get("llm_severe_stagnation_signal") == "progressless_churn",
             "llm_top_productive_family": max(self.controller.memory.llm_family_payoff.items(), key=lambda x: x[1].get("changed", 0))[0] if self.controller.memory.llm_family_payoff else "",
             "llm_top_unproductive_family": max(self.controller.memory.llm_family_payoff.items(), key=lambda x: (x[1].get("noop", 0) + x[1].get("death", 0)))[0] if self.controller.memory.llm_family_payoff else "",
-            "llm_family_payoff_summary": {fam: data.get("changed", 0) - data.get("noop", 0) for fam, data in self.controller.memory.llm_family_payoff.items()},
+            "llm_family_payoff_summary": {
+                fam: {
+                    "changed": data.get("changed", 0),
+                    "progress": data.get("progress", 0),
+                    "noop": data.get("noop", 0),
+                    "death": data.get("death", 0),
+                    "score": data.get("changed", 0) + 3 * data.get("progress", 0) - data.get("noop", 0) - 2 * data.get("death", 0),
+                }
+                for fam, data in self.controller.memory.llm_family_payoff.items()
+            },
             "predicted": spec.predicted_effect,
             "program_id": spec.program_id,
             "predicted_state": spec.predicted_state_key,
