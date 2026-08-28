@@ -574,6 +574,12 @@ class DiagnosticTraceRecord:
     stagnation_override_used: bool = False
     competing_hypothesis_count: int = 0
     stuck_mode_activations: int = 0
+    llm_rejected_by_alignment: int = 0
+    llm_rejected_by_semantic_gate: int = 0
+    llm_rejected_by_dead_signature: int = 0
+    llm_rejected_by_probe_budget: int = 0
+    llm_rejected_by_coordinate_fatigue: int = 0
+    llm_escape_hatch_used: bool = False
     action_semantics_summary: dict[str, Any] = field(default_factory=dict)
 
 
@@ -1846,6 +1852,8 @@ class TraceMemory:
         self.probes_this_level = 0
         self.total_mental_eliminations = 0
         self.spatial_visits: dict[tuple[int, int], int] = defaultdict(int)
+        self.spatial_visits_by_action: dict[tuple[str, int, int], int] = defaultdict(int)
+        self.escape_hatch_used = False
 
     def reset_level(self) -> None:
         self.transitions.clear()
@@ -1856,6 +1864,8 @@ class TraceMemory:
         self.same_family_streak = 0
         self.probes_this_level = 0
         self.spatial_visits.clear()
+        self.spatial_visits_by_action.clear()
+        self.escape_hatch_used = False
 
     def reset_attempt(self) -> None:
         # Preserve learned transitions, state-action counts, global outcomes, and
@@ -1871,6 +1881,7 @@ class TraceMemory:
             x, y = data_dict.get("x"), data_dict.get("y")
             if x is not None and y is not None:
                 self.spatial_visits[(x, y)] += 1
+                self.spatial_visits_by_action[(transition.action.name, x, y)] += 1
         
         # Track same family streak to detect boredom/collapse
         if len(self.transitions) > 1 and transition.event.level_delta == 0:
@@ -4703,6 +4714,11 @@ class OptionalLocalReasoner:
         self.llm_family_repeat_rejections = 0
         self.llm_schema_valid_but_unexecutable = 0
         self.llm_filtered_for_action_mismatch = 0
+        self.llm_rejected_by_alignment = 0
+        self.llm_rejected_by_semantic_gate = 0
+        self.llm_rejected_by_dead_signature = 0
+        self.llm_rejected_by_probe_budget = 0
+        self.llm_rejected_by_coordinate_fatigue = 0
         self.recent_abductions: list[tuple[str, str]] = []
         self.recent_mismatch_rejections: deque[str] = deque(maxlen=5)
         self.recent_impossible_rejections: deque[str] = deque(maxlen=5)
@@ -5870,6 +5886,8 @@ class MetacognitiveController:
         prediction: ProgramPrediction | None,
         is_probe: bool,
         profile: RuntimeProfile,
+        is_severe_stagnation: bool = False,
+        is_llm_proposal: bool = False,
     ) -> AlignmentDecision:
         if spec.name not in legal_names:
             return AlignmentDecision(False, -10.0, -1.0, 1.0, (), ("illegal_action",))
@@ -5888,20 +5906,49 @@ class MetacognitiveController:
             if not base_decision.allowed:
                 return base_decision
                 
+        # Bounded Coordinate Exclusion & Fatigue
+        if "x" in data and "y" in data:
+            exact_visits = self.memory.spatial_visits_by_action.get((spec.name, data["x"], data["y"]), 0)
+            if exact_visits >= 3:
+                return AlignmentDecision(False, -10.0, -1.0, 1.0, (), ("coordinate_fatigue",))
+            
+            visits = self.memory.spatial_visits.get((data["x"], data["y"]), 0)
+            if visits > 0:
+                penalty = visits * 2.0
+                if base_decision is not None:
+                    base_decision = AlignmentDecision(base_decision.allowed, base_decision.score - penalty, base_decision.goal_delta, base_decision.risk, base_decision.goal_ids, base_decision.reasons + ("spatial_penalty",))
+                else:
+                    base_decision = AlignmentDecision(True, -penalty, 0.0, 1.0, (), ("spatial_penalty",))
+
+        # Hard-gate persistent deterministic no-ops
+        if observed >= 10 and not is_llm_proposal:
+            noop_rate = action_stats.get("noop", 0) / observed
+            if noop_rate >= 0.9 and not is_probe:
+                return AlignmentDecision(False, -10.0, -1.0, 1.0, (), ("semantic_gating_persistent_noop",))
+                
         # Semantic Hard-Gating
         if observed >= 5:
             is_movement_hypothesis = prediction is not None and prediction.kind in ("translation", "gravity", "drag_component")
             is_recolor_hypothesis = prediction is not None and prediction.kind in ("conditional_recolor", "component_recolor")
             
             if is_movement_hypothesis and action_stats.get("movement_like", 0) == 0:
-                return AlignmentDecision(False, -10.0, -1.0, 1.0, (), ("semantic_gating_not_movement_capable",))
+                if is_severe_stagnation:
+                    if base_decision is not None:
+                        base_decision = AlignmentDecision(base_decision.allowed, base_decision.score - 5.0, base_decision.goal_delta, base_decision.risk, base_decision.goal_ids, base_decision.reasons + ("semantic_gating_movement_penalty",))
+                    else:
+                        base_decision = AlignmentDecision(True, -5.0, 0.0, 1.0, (), ("semantic_gating_movement_penalty",))
+                else:
+                    return AlignmentDecision(False, -10.0, -1.0, 1.0, (), ("semantic_gating_not_movement_capable",))
                 
             if is_recolor_hypothesis and action_stats.get("movement_like", 0) > observed * 0.5:
                 # Down-rank significantly
                 if base_decision is not None:
                     base_decision = AlignmentDecision(base_decision.allowed, base_decision.score - 5.0, base_decision.goal_delta, base_decision.risk, base_decision.goal_ids, base_decision.reasons + ("semantic_gating_movement_penalty",))
                 else:
-                    return AlignmentDecision(False, -5.0, -1.0, 1.0, (), ("semantic_gating_movement_penalty",))
+                    if is_severe_stagnation:
+                        base_decision = AlignmentDecision(True, -5.0, 0.0, 1.0, (), ("semantic_gating_movement_penalty",))
+                    else:
+                        return AlignmentDecision(False, -5.0, -1.0, 1.0, (), ("semantic_gating_movement_penalty",))
                     
             if action_stats.get("death", 0) >= max(3, observed * 0.4):
                 if "x" in data and "y" in data:
@@ -6053,14 +6100,22 @@ class MetacognitiveController:
                 if candidate.spec.name in recent_actions:
                     evidence_score -= 1.5
                     
-                # Penalize exact predicted effect repetition
+                # Penalize exact predicted effect repetition or null effects
                 if prediction is not None:
-                    eff_count = self.path_planner.dynamics.effect_signatures[candidate.spec.name].get(prediction.expected_effect, 0)
-                    evidence_score -= (eff_count * 0.5)
-                    if repeated_sig and prediction.expected_effect == repeated_sig:
+                    if prediction.expected_effect is None:
+                        if observed >= 5:
+                            evidence_score -= 3.0
+                    else:
+                        eff_count = self.path_planner.dynamics.effect_signatures[candidate.spec.name].get(prediction.expected_effect, 0)
+                        evidence_score -= (eff_count * 0.5)
+                        if repeated_sig and prediction.expected_effect == repeated_sig:
+                            evidence_score -= 3.0
+                else:
+                    if observed >= 5:
                         evidence_score -= 3.0
-                    
-                    # Reward predicted structural changes
+                        
+                # Reward predicted structural changes
+                if prediction is not None:
                     if prediction.grid.shape != scene.grid.shape:
                         evidence_score += 2.0
                 
@@ -6271,7 +6326,10 @@ class MetacognitiveController:
             if not skip_reason and _OLLAMA_LOCK.locked():
                 self.recent_lock_skip_count += 1
                 if self.recent_lock_skip_count >= 3:
-                    self.reasoner_lock_backoff_steps = 10
+                    if self.memory.no_op_streak >= 40 and remaining_sec is not None and remaining_sec > 1800:
+                        self.reasoner_lock_backoff_steps = 5
+                    else:
+                        self.reasoner_lock_backoff_steps = 10
                     skip_reason = "skipped_due_to_lock_backoff"
                     self.reasoner_suppressed = True
                     self.reasoner_suppression_reason = "lock_backoff"
@@ -6365,13 +6423,41 @@ class MetacognitiveController:
                                 is_probe = self.memory.tried_count(
                                     scene.exact_key, model_action) == 0
                                 prediction = self._predict(scene, model_action, profile)
+                                is_severe_stagnation = self.memory.no_op_streak >= 25
                                 decision = self._verify(
-                                    scene, model_action, legal_names, prediction, is_probe, profile)
-                                if (
-                                    not self.dead.is_dead(signature)
-                                    and decision.allowed
-                                    and (not is_probe or self.memory.probes_this_level < self.config.max_physical_probes_per_level)
-                                ):
+                                    scene, model_action, legal_names, prediction, is_probe, profile, is_severe_stagnation=is_severe_stagnation, is_llm_proposal=True)
+                                
+                                is_dead_sig = self.dead.is_dead(signature)
+                                is_probe_exhausted = is_probe and self.memory.probes_this_level >= self.config.max_physical_probes_per_level
+                                
+                                allowed = decision.allowed
+                                if not allowed and is_severe_stagnation and not self.memory.escape_hatch_used and not is_dead_sig:
+                                    if decision.score >= -6.0 and "illegal_action" not in decision.reasons and "incomplete_coordinates" not in decision.reasons and "coordinate_out_of_bounds" not in decision.reasons:
+                                        allowed = True
+                                        self.memory.escape_hatch_used = True
+                                        decision = AlignmentDecision(True, decision.score, decision.goal_delta, decision.risk, decision.goal_ids, decision.reasons + ("escape_hatch_override",))
+                                
+                                if not allowed or is_dead_sig or is_probe_exhausted:
+                                    if is_dead_sig:
+                                        self.reasoner.llm_rejected_by_dead_signature += 1
+                                        failed_summaries.append(f"Action {model_action.name} rejected due to dead signature.")
+                                    elif is_probe_exhausted:
+                                        self.reasoner.llm_rejected_by_probe_budget += 1
+                                        failed_summaries.append(f"Action {model_action.name} rejected: probe budget exhausted.")
+                                    else:
+                                        reasons_str = ",".join(decision.reasons)
+                                        if any(r.startswith("semantic_gating") for r in decision.reasons):
+                                            self.reasoner.llm_rejected_by_semantic_gate += 1
+                                        elif any(r.startswith("coordinate_fatigue") for r in decision.reasons):
+                                            self.reasoner.llm_rejected_by_coordinate_fatigue += 1
+                                        else:
+                                            self.reasoner.llm_rejected_by_alignment += 1
+                                        failed_summaries.append(f"Action {model_action.name} rejected: {reasons_str} (score {round(decision.score, 2)})")
+                                        
+                                    if fam != "none":
+                                        pair_key = (fam, model_action.name)
+                                        self.reasoner.failed_verifications[pair_key] = self.reasoner.failed_verifications.get(pair_key, 0) + 1
+                                else:
                                     surviving_proposals_this_step += 1
                                     self.llm_step_meta["reasoner_surviving_proposals_this_step"] = surviving_proposals_this_step
                                     self.last_model_milestone = milestone_name
@@ -6402,16 +6488,6 @@ class MetacognitiveController:
                                             "milestone": milestone_name,
                                             **self.llm_step_meta
                                         }
-                                else:
-                                    if proposal.program_spec is not None:
-                                        kind = str(proposal.program_spec.get("kind", ""))
-                                        failed_summaries.append(f"Program kind '{kind}' resulted in verification score {round(decision.score, 2)}")
-                                    else:
-                                        failed_summaries.append(f"Action {model_action.name} resulted in verification score {round(decision.score, 2)}")
-                                        
-                                    if fam != "none":
-                                        pair_key = (fam, model_action.name)
-                                        self.reasoner.failed_verifications[pair_key] = self.reasoner.failed_verifications.get(pair_key, 0) + 1
                         
                         if best_spec is not None:
                             # Smarter failed consultation reset: reset backoff and lock state on successful model proposal.
@@ -6799,6 +6875,12 @@ class MyAgent(Agent):
             llm_family_repeat_rejections=self.controller.reasoner.llm_family_repeat_rejections,
             llm_schema_valid_but_unexecutable=self.controller.reasoner.llm_schema_valid_but_unexecutable,
             llm_filtered_for_action_mismatch=self.controller.reasoner.llm_filtered_for_action_mismatch,
+            llm_rejected_by_alignment=self.controller.reasoner.llm_rejected_by_alignment,
+            llm_rejected_by_semantic_gate=self.controller.reasoner.llm_rejected_by_semantic_gate,
+            llm_rejected_by_dead_signature=self.controller.reasoner.llm_rejected_by_dead_signature,
+            llm_rejected_by_probe_budget=self.controller.reasoner.llm_rejected_by_probe_budget,
+            llm_rejected_by_coordinate_fatigue=self.controller.reasoner.llm_rejected_by_coordinate_fatigue,
+            llm_escape_hatch_used=self.controller.memory.escape_hatch_used,
             reasoner_consulted_this_step=bool(self.pending_reasoning.get("reasoner_consulted_this_step", False)),
             reasoner_parsed_abduction_this_step=bool(self.pending_reasoning.get("reasoner_parsed_abduction_this_step", False)),
             reasoner_surviving_proposals_this_step=int(self.pending_reasoning.get("reasoner_surviving_proposals_this_step", 0)),
@@ -7006,6 +7088,12 @@ class MyAgent(Agent):
             "final_action_source": decision.get("final_action_source", spec.source),
             "final_action_from_llm": decision.get("final_action_from_llm", False),
             "model_called": decision.get("reasoner_consulted_this_step", self.controller.llm_step_meta.get("reasoner_consulted_this_step", False)),
+            "llm_rejected_by_alignment": self.reasoner.llm_rejected_by_alignment,
+            "llm_rejected_by_semantic_gate": self.reasoner.llm_rejected_by_semantic_gate,
+            "llm_rejected_by_dead_signature": self.reasoner.llm_rejected_by_dead_signature,
+            "llm_rejected_by_probe_budget": self.reasoner.llm_rejected_by_probe_budget,
+            "llm_rejected_by_coordinate_fatigue": self.reasoner.llm_rejected_by_coordinate_fatigue,
+            "llm_escape_hatch_used": self.controller.memory.escape_hatch_used,
             "predicted": spec.predicted_effect,
             "program_id": spec.program_id,
             "predicted_state": spec.predicted_state_key,
