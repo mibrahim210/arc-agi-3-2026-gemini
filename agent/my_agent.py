@@ -580,6 +580,10 @@ class DiagnosticTraceRecord:
     llm_rejected_by_probe_budget: int = 0
     llm_rejected_by_coordinate_fatigue: int = 0
     llm_escape_hatch_used: bool = False
+    llm_semantic_override_attempts: int = 0
+    llm_semantic_override_used: bool = False
+    llm_semantic_override_rejections: int = 0
+    llm_breakout_used_this_step: bool = False
     action_semantics_summary: dict[str, Any] = field(default_factory=dict)
 
 
@@ -4719,6 +4723,8 @@ class OptionalLocalReasoner:
         self.llm_rejected_by_dead_signature = 0
         self.llm_rejected_by_probe_budget = 0
         self.llm_rejected_by_coordinate_fatigue = 0
+        self.llm_semantic_override_attempts = 0
+        self.llm_semantic_override_rejections = 0
         self.recent_abductions: list[tuple[str, str]] = []
         self.recent_mismatch_rejections: deque[str] = deque(maxlen=5)
         self.recent_impossible_rejections: deque[str] = deque(maxlen=5)
@@ -5932,7 +5938,12 @@ class MetacognitiveController:
             is_recolor_hypothesis = prediction is not None and prediction.kind in ("conditional_recolor", "component_recolor")
             
             if is_movement_hypothesis and action_stats.get("movement_like", 0) == 0:
-                if is_severe_stagnation:
+                if is_severe_stagnation and is_llm_proposal:
+                    if base_decision is not None:
+                        base_decision = AlignmentDecision(base_decision.allowed, base_decision.score - 5.0, base_decision.goal_delta, base_decision.risk, base_decision.goal_ids, base_decision.reasons + ("semantic_override_penalty",))
+                    else:
+                        base_decision = AlignmentDecision(True, -5.0, 0.0, 1.0, (), ("semantic_override_penalty",))
+                elif is_severe_stagnation:
                     if base_decision is not None:
                         base_decision = AlignmentDecision(base_decision.allowed, base_decision.score - 5.0, base_decision.goal_delta, base_decision.risk, base_decision.goal_ids, base_decision.reasons + ("semantic_gating_movement_penalty",))
                     else:
@@ -5941,14 +5952,20 @@ class MetacognitiveController:
                     return AlignmentDecision(False, -10.0, -1.0, 1.0, (), ("semantic_gating_not_movement_capable",))
                 
             if is_recolor_hypothesis and action_stats.get("movement_like", 0) > observed * 0.5:
-                # Down-rank significantly
-                if base_decision is not None:
-                    base_decision = AlignmentDecision(base_decision.allowed, base_decision.score - 5.0, base_decision.goal_delta, base_decision.risk, base_decision.goal_ids, base_decision.reasons + ("semantic_gating_movement_penalty",))
-                else:
-                    if is_severe_stagnation:
-                        base_decision = AlignmentDecision(True, -5.0, 0.0, 1.0, (), ("semantic_gating_movement_penalty",))
+                if is_severe_stagnation and is_llm_proposal:
+                    if base_decision is not None:
+                        base_decision = AlignmentDecision(base_decision.allowed, base_decision.score - 5.0, base_decision.goal_delta, base_decision.risk, base_decision.goal_ids, base_decision.reasons + ("semantic_override_penalty",))
                     else:
-                        return AlignmentDecision(False, -5.0, -1.0, 1.0, (), ("semantic_gating_movement_penalty",))
+                        base_decision = AlignmentDecision(True, -5.0, 0.0, 1.0, (), ("semantic_override_penalty",))
+                else:
+                    # Down-rank significantly
+                    if base_decision is not None:
+                        base_decision = AlignmentDecision(base_decision.allowed, base_decision.score - 5.0, base_decision.goal_delta, base_decision.risk, base_decision.goal_ids, base_decision.reasons + ("semantic_gating_movement_penalty",))
+                    else:
+                        if is_severe_stagnation:
+                            base_decision = AlignmentDecision(True, -5.0, 0.0, 1.0, (), ("semantic_gating_movement_penalty",))
+                        else:
+                            return AlignmentDecision(False, -5.0, -1.0, 1.0, (), ("semantic_gating_movement_penalty",))
                     
             if action_stats.get("death", 0) >= max(3, observed * 0.4):
                 if "x" in data and "y" in data:
@@ -6431,19 +6448,25 @@ class MetacognitiveController:
                                 is_probe_exhausted = is_probe and self.memory.probes_this_level >= self.config.max_physical_probes_per_level
                                 
                                 allowed = decision.allowed
+                                if "semantic_override_penalty" in decision.reasons:
+                                    self.reasoner.llm_semantic_override_attempts += 1
+                                    
                                 if not allowed and is_severe_stagnation and not self.memory.escape_hatch_used and not is_dead_sig:
                                     if decision.score >= -6.0 and "illegal_action" not in decision.reasons and "incomplete_coordinates" not in decision.reasons and "coordinate_out_of_bounds" not in decision.reasons:
                                         allowed = True
                                         self.memory.escape_hatch_used = True
                                         decision = AlignmentDecision(True, decision.score, decision.goal_delta, decision.risk, decision.goal_ids, decision.reasons + ("escape_hatch_override",))
                                 
-                                if not allowed or is_dead_sig or is_probe_exhausted:
+                                if allowed and "semantic_override_penalty" in decision.reasons:
+                                    self.llm_step_meta["llm_semantic_override_used"] = True
+                                    self.llm_step_meta["llm_breakout_used_this_step"] = True
+                                
+                                if not allowed or is_dead_sig:
+                                    if "semantic_override_penalty" in decision.reasons:
+                                        self.reasoner.llm_semantic_override_rejections += 1
                                     if is_dead_sig:
                                         self.reasoner.llm_rejected_by_dead_signature += 1
                                         failed_summaries.append(f"Action {model_action.name} rejected due to dead signature.")
-                                    elif is_probe_exhausted:
-                                        self.reasoner.llm_rejected_by_probe_budget += 1
-                                        failed_summaries.append(f"Action {model_action.name} rejected: probe budget exhausted.")
                                     else:
                                         reasons_str = ",".join(decision.reasons)
                                         if any(r.startswith("semantic_gating") for r in decision.reasons):
@@ -6881,6 +6904,10 @@ class MyAgent(Agent):
             llm_rejected_by_probe_budget=self.controller.reasoner.llm_rejected_by_probe_budget,
             llm_rejected_by_coordinate_fatigue=self.controller.reasoner.llm_rejected_by_coordinate_fatigue,
             llm_escape_hatch_used=self.controller.memory.escape_hatch_used,
+            llm_semantic_override_attempts=self.controller.reasoner.llm_semantic_override_attempts,
+            llm_semantic_override_used=self.controller.llm_step_meta.get("llm_semantic_override_used", False),
+            llm_semantic_override_rejections=self.controller.reasoner.llm_semantic_override_rejections,
+            llm_breakout_used_this_step=self.controller.llm_step_meta.get("llm_breakout_used_this_step", False),
             reasoner_consulted_this_step=bool(self.pending_reasoning.get("reasoner_consulted_this_step", False)),
             reasoner_parsed_abduction_this_step=bool(self.pending_reasoning.get("reasoner_parsed_abduction_this_step", False)),
             reasoner_surviving_proposals_this_step=int(self.pending_reasoning.get("reasoner_surviving_proposals_this_step", 0)),
@@ -7094,6 +7121,10 @@ class MyAgent(Agent):
             "llm_rejected_by_probe_budget": self.reasoner.llm_rejected_by_probe_budget,
             "llm_rejected_by_coordinate_fatigue": self.reasoner.llm_rejected_by_coordinate_fatigue,
             "llm_escape_hatch_used": self.controller.memory.escape_hatch_used,
+            "llm_semantic_override_attempts": self.reasoner.llm_semantic_override_attempts,
+            "llm_semantic_override_used": self.controller.llm_step_meta.get("llm_semantic_override_used", False),
+            "llm_semantic_override_rejections": self.reasoner.llm_semantic_override_rejections,
+            "llm_breakout_used_this_step": self.controller.llm_step_meta.get("llm_breakout_used_this_step", False),
             "predicted": spec.predicted_effect,
             "program_id": spec.program_id,
             "predicted_state": spec.predicted_state_key,
