@@ -592,6 +592,19 @@ class DiagnosticTraceRecord:
     llm_promoted_programs_count: int = 0
     churn_stagnation_detected: bool = False
     follow_through_led_to_progress: bool = False
+    early_breakout_acceleration_used: bool = False
+    level_budget_pressure_signal: float = 0.0
+    level_steps_elapsed: int = 0
+    level_budget_target: int = 0
+    level_budget_pressure: float = 0.0
+    level_budget_escalation_used: bool = False
+    macro_replay_active: bool = False
+    macro_replay_steps_remaining: int = 0
+    macro_replay_family: str = ""
+    macro_replay_program_id: str = ""
+    macro_replay_aborted_reason: str = ""
+    level_transition_transfer_used: bool = False
+    transferred_mechanism_family: str = ""
     llm_top_productive_family: str = ""
     llm_top_unproductive_family: str = ""
     llm_family_payoff_summary: dict[str, Any] = field(default_factory=dict)
@@ -1878,6 +1891,15 @@ class TraceMemory:
         self.llm_promoted_program_ids: set[str] = set()
         self.llm_follow_through_recent_steps: int = 0
         self.follow_through_led_to_progress: bool = False
+        self.level_steps: int = 0
+        self.current_level_index: int = 0
+        self.level_progress_events: int = 0
+        self.macro_replay_queue: deque[ActionSpec] = deque()
+        self.macro_replay_family: str = ""
+        self.macro_replay_program_id: str = ""
+        self.macro_replay_aborted_reason: str = ""
+        self.transferred_mechanism_family: str = ""
+        self.level_transition_transfer_used: bool = False
 
     def reset_level(self) -> None:
         self.transitions.clear()
@@ -1898,6 +1920,15 @@ class TraceMemory:
         self.llm_promoted_program_ids.clear()
         self.llm_follow_through_recent_steps = 0
         self.follow_through_led_to_progress = False
+        self.level_steps = 0
+        self.current_level_index += 1
+        self.level_progress_events = 0
+        self.macro_replay_queue.clear()
+        self.macro_replay_family = ""
+        self.macro_replay_program_id = ""
+        self.macro_replay_aborted_reason = ""
+        self.transferred_mechanism_family = self.llm_recent_committed_family or "translation"
+        self.level_transition_transfer_used = bool(self.transferred_mechanism_family)
 
     def reset_attempt(self) -> None:
         # Preserve learned transitions, state-action counts, global outcomes, and
@@ -5913,6 +5944,20 @@ class MetacognitiveController:
         return self.programs.predict_grid(scene.grid, spec, scene)
 
     def _check_severe_stagnation(self) -> tuple[bool, str]:
+        target_budget = 120
+        pressure = min(2.0, self.memory.level_steps / target_budget) if target_budget > 0 else 0.0
+        is_early_level = self.memory.current_level_index <= 1
+        no_level_progress = self.memory.level_progress_events == 0
+
+        # Early-level breakout acceleration: trigger earlier before budget is burned
+        if is_early_level and no_level_progress:
+            accelerated_steps_thresh = max(14, int(30 - 10 * pressure))
+            if self.steps_since_progress >= accelerated_steps_thresh:
+                return True, "early_breakout_accelerated"
+            accelerated_noop_thresh = max(6, int(12 - 4 * pressure))
+            if self.memory.no_op_streak >= accelerated_noop_thresh:
+                return True, "early_noop_accelerated"
+
         if self.steps_since_progress >= 30:
             return True, "steps_since_progress"
         if self.memory.no_op_streak >= 12:
@@ -6123,6 +6168,41 @@ class MetacognitiveController:
                 )
                 return spec, False, {"stage": "verified_plan_queue", "alignment": round(decision.score, 3)}
             self.plan_queue.clear()
+
+        # 2b-1) Bounded Goal-Directed Macro Replay for Productive Programs
+        while self.memory.macro_replay_queue:
+            queued_spec = self.memory.macro_replay_queue.popleft()
+            if queued_spec.name not in legal_names:
+                self.memory.macro_replay_queue.clear()
+                self.memory.macro_replay_aborted_reason = "illegal_action"
+                break
+            prediction = self._predict(scene, queued_spec, profile)
+            decision = self._verify(scene, queued_spec, legal_names, prediction, False, profile)
+            signature = _action_signature(scene, queued_spec)
+            if not decision.allowed or self.dead.is_dead(signature):
+                self.memory.macro_replay_queue.clear()
+                self.memory.macro_replay_aborted_reason = "safety_or_dead_signature"
+                break
+            
+            spec = ActionSpec(
+                name=queued_spec.name,
+                data=queued_spec.data,
+                source="macro_replay",
+                predicted_effect=queued_spec.predicted_effect if prediction is None else prediction.expected_effect,
+                score=queued_spec.score + decision.score,
+                program_id=self.memory.macro_replay_program_id or (prediction.program_id if prediction else None),
+                predicted_state_key=None if prediction is None else _stable_hash_bytes(prediction.grid.tobytes()),
+                goal_ids=decision.goal_ids,
+            )
+            return spec, False, {
+                "stage": "macro_replay",
+                "final_action_source": "macro_replay",
+                "macro_replay_active": True,
+                "macro_replay_family": self.memory.macro_replay_family,
+                "macro_replay_program_id": self.memory.macro_replay_program_id,
+                "macro_replay_steps_remaining": len(self.memory.macro_replay_queue),
+                **self.llm_step_meta
+            }
 
         candidates = self.candidate_generator.generate(
             scene, legal_actions, use_hypotheses=profile.use_hypotheses)
@@ -6961,6 +7041,22 @@ class MyAgent(Agent):
             if event.level_delta > 0 or event.win:
                 self.memory.follow_through_led_to_progress = True
             self.memory.llm_follow_through_recent_steps -= 1
+
+        # Seed bounded macro replay if a directional translation or verified program succeeded
+        if self.pending_reasoning.get("final_action_source") in ("milestone_model_verified", "milestone_model_goal_verified", "llm_program", "llm_follow_through", "counterfactual_program"):
+            if not event.no_op and not event.game_over:
+                fam = self.pending_reasoning.get("llm_family") or self.memory.llm_recent_committed_family or "translation"
+                if fam in ("translation", "component_recolor") and len(self.memory.macro_replay_queue) == 0:
+                    for _ in range(2):
+                        self.memory.macro_replay_queue.append(self.pending_action)
+                    self.memory.macro_replay_family = fam
+                    self.memory.macro_replay_program_id = str(self.pending_action.program_id or "")
+
+        # Abort macro replay on unexpected no-op or collision
+        if self.pending_reasoning.get("final_action_source") == "macro_replay":
+            if event.no_op or event.game_over:
+                self.memory.macro_replay_queue.clear()
+                self.memory.macro_replay_aborted_reason = "unexpected_noop_or_collision" 
         if profile.learn_hypotheses:
             self.hypotheses.record(self.pending_signature, event)
         self.world_model.record(transition)
@@ -7066,6 +7162,19 @@ class MyAgent(Agent):
             llm_promoted_programs_count=len(self.controller.memory.llm_promoted_program_ids),
             churn_stagnation_detected=self.controller.llm_step_meta.get("llm_severe_stagnation_signal") == "progressless_churn",
             follow_through_led_to_progress=self.controller.memory.follow_through_led_to_progress,
+            early_breakout_acceleration_used="early" in str(self.controller.llm_step_meta.get("llm_severe_stagnation_signal", "")),
+            level_budget_pressure_signal=round(min(2.0, self.controller.memory.level_steps / 120.0), 3),
+            level_steps_elapsed=self.controller.memory.level_steps,
+            level_budget_target=120,
+            level_budget_pressure=round(min(2.0, self.controller.memory.level_steps / 120.0), 3),
+            level_budget_escalation_used=self.controller.memory.level_steps > 120 and self.controller.memory.level_progress_events == 0,
+            macro_replay_active=bool(self.pending_reasoning.get("macro_replay_active", False)),
+            macro_replay_steps_remaining=len(self.controller.memory.macro_replay_queue),
+            macro_replay_family=self.controller.memory.macro_replay_family,
+            macro_replay_program_id=self.controller.memory.macro_replay_program_id,
+            macro_replay_aborted_reason=self.controller.memory.macro_replay_aborted_reason,
+            level_transition_transfer_used=self.controller.memory.level_transition_transfer_used,
+            transferred_mechanism_family=self.controller.memory.transferred_mechanism_family,
             llm_top_productive_family=max(self.controller.memory.llm_family_payoff.items(), key=lambda x: x[1].get("changed", 0))[0] if self.controller.memory.llm_family_payoff else "",
             llm_top_unproductive_family=max(self.controller.memory.llm_family_payoff.items(), key=lambda x: (x[1].get("noop", 0) + x[1].get("death", 0)))[0] if self.controller.memory.llm_family_payoff else "",
             llm_family_payoff_summary={
@@ -7237,6 +7346,7 @@ class MyAgent(Agent):
             )
 
 
+        self.memory.level_steps += 1
         runtime_tier = self.runtime.tier()
         spec, was_probe, decision = self.controller.choose(
             scene,
@@ -7303,6 +7413,18 @@ class MyAgent(Agent):
             "llm_promoted_programs_count": len(self.controller.memory.llm_promoted_program_ids),
             "churn_stagnation_detected": self.controller.llm_step_meta.get("llm_severe_stagnation_signal") == "progressless_churn",
             "follow_through_led_to_progress": self.controller.memory.follow_through_led_to_progress,
+            "early_breakout_acceleration_used": "early" in str(self.controller.llm_step_meta.get("llm_severe_stagnation_signal", "")),
+            "level_budget_pressure": round(min(2.0, self.controller.memory.level_steps / 120.0), 3),
+            "level_steps_elapsed": self.controller.memory.level_steps,
+            "level_budget_target": 120,
+            "level_budget_escalation_used": self.controller.memory.level_steps > 120 and self.controller.memory.level_progress_events == 0,
+            "macro_replay_active": bool(decision.get("macro_replay_active", False)),
+            "macro_replay_steps_remaining": len(self.controller.memory.macro_replay_queue),
+            "macro_replay_family": self.controller.memory.macro_replay_family,
+            "macro_replay_program_id": self.controller.memory.macro_replay_program_id,
+            "macro_replay_aborted_reason": self.controller.memory.macro_replay_aborted_reason,
+            "level_transition_transfer_used": self.controller.memory.level_transition_transfer_used,
+            "transferred_mechanism_family": self.controller.memory.transferred_mechanism_family,
             "llm_top_productive_family": max(self.controller.memory.llm_family_payoff.items(), key=lambda x: x[1].get("changed", 0))[0] if self.controller.memory.llm_family_payoff else "",
             "llm_top_unproductive_family": max(self.controller.memory.llm_family_payoff.items(), key=lambda x: (x[1].get("noop", 0) + x[1].get("death", 0)))[0] if self.controller.memory.llm_family_payoff else "",
             "llm_family_payoff_summary": {
