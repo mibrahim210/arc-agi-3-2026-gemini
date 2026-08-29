@@ -610,6 +610,16 @@ class DiagnosticTraceRecord:
     counterfactual_pruned_count: int = 0
     subgoal_distance_reward: float = 0.0
     negative_hypothesis_eliminations: int = 0
+    mode: str = "discovery_mode"
+    top_mechanism_family: str = "movement_control"
+    top_mechanism_confidence: float = 0.1
+    competing_mechanism_families: list[str] = field(default_factory=list)
+    mechanism_family_scores: dict[str, float] = field(default_factory=dict)
+    priority_program_families: list[str] = field(default_factory=list)
+    invariants_to_preserve: list[str] = field(default_factory=list)
+    mechanism_shift_event: bool = False
+    mechanism_aligned_action: bool = False
+    mechanism_discriminating_probe_used: bool = False
     llm_top_productive_family: str = ""
     llm_top_unproductive_family: str = ""
     llm_family_payoff_summary: dict[str, Any] = field(default_factory=dict)
@@ -1908,6 +1918,19 @@ class TraceMemory:
         self.early_classified_mechanism: str = ""
         self.counterfactual_pruned_count: int = 0
         self.negative_hypothesis_eliminations: int = 0
+        self.mode: str = "discovery_mode"
+        self.mechanism_scores: dict[str, float] = {
+            "movement_control": 0.2, "targeted_recolor": 0.1, "component_delete": 0.05,
+            "drag_or_push": 0.05, "line_or_beam": 0.05, "flood_or_fill": 0.05,
+            "gravity_or_fall": 0.05, "copy_or_stamp": 0.05, "count_or_trigger": 0.05,
+            "topology_switch": 0.05
+        }
+        self.top_mechanism_family: str = "movement_control"
+        self.top_mechanism_confidence: float = 0.2
+        self.competing_mechanism_families: list[str] = ["movement_control", "targeted_recolor"]
+        self.priority_program_families: list[str] = ["translation", "conditional_recolor"]
+        self.invariants_to_preserve: list[str] = []
+        self.mechanism_shift_event: bool = False
 
     def reset_level(self) -> None:
         self.transitions.clear()
@@ -1935,11 +1958,30 @@ class TraceMemory:
         self.macro_replay_family = ""
         self.macro_replay_program_id = ""
         self.macro_replay_aborted_reason = ""
-        self.transferred_mechanism_family = self.llm_recent_committed_family or "translation"
-        self.level_transition_transfer_used = bool(self.transferred_mechanism_family)
-        self.early_classified_mechanism = self.transferred_mechanism_family or ""
+        # Transfer only if high confidence; do NOT default to translation blindly
+        if self.top_mechanism_confidence >= 0.35 and self.top_mechanism_family:
+            self.transferred_mechanism_family = self.top_mechanism_family
+            self.level_transition_transfer_used = True
+        else:
+            self.transferred_mechanism_family = "undetermined"
+            self.level_transition_transfer_used = False
+
+        self.early_classified_mechanism = self.transferred_mechanism_family if self.transferred_mechanism_family != "undetermined" else ""
         self.counterfactual_pruned_count = 0
         self.negative_hypothesis_eliminations = 0
+        self.mode = "discovery_mode"
+        self.mechanism_scores = {
+            "movement_control": 0.2 if self.transferred_mechanism_family == "movement_control" else 0.1,
+            "targeted_recolor": 0.2 if self.transferred_mechanism_family == "targeted_recolor" else 0.1,
+            "component_delete": 0.05, "drag_or_push": 0.05, "line_or_beam": 0.05, "flood_or_fill": 0.05,
+            "gravity_or_fall": 0.05, "copy_or_stamp": 0.05, "count_or_trigger": 0.05, "topology_switch": 0.05
+        }
+        self.top_mechanism_family = max(self.mechanism_scores, key=self.mechanism_scores.get)
+        self.top_mechanism_confidence = 0.2
+        self.competing_mechanism_families = ["movement_control", "targeted_recolor"]
+        self.priority_program_families = []
+        self.invariants_to_preserve.clear()
+        self.mechanism_shift_event = False
 
     def reset_attempt(self) -> None:
         # Preserve learned transitions, state-action counts, global outcomes, and
@@ -5119,8 +5161,8 @@ class OptionalLocalReasoner:
             "Python schema (for data analysis only): "
             '{"type":"python","code":"for t in recent_transitions: print(t[\'action\'])"}\n'
             "Final schema (infer the mechanism, relational structure, or control logic that caused the observed transition!): "
-            '{"type":"abduction","puzzle_family":"mechanism_inference","suggested_programs":[{"kind":"conditional_recolor","action":"ACTION1","params":{"source_color":2,"target_color":3,"neighbor_color":4},"why":"..."}, {"action":"...","why":"..."}]}\n'
-            "CRITICAL: You MUST include the nested 'suggested_programs' array to propose a structural hypothesis!\n"
+            '{"type":"abduction","mechanism_family":"movement_control","mechanism_confidence":0.85,"priority_program_families":["translation"],"invariants_to_preserve":["color_0"],"recommended_probe_type":"directional_move","suggested_programs":[{"kind":"conditional_recolor","action":"ACTION1","params":{"source_color":2,"target_color":3,"neighbor_color":4},"why":"..."}, {"action":"...","why":"..."}]}\n'
+            "CRITICAL: You MUST include 'mechanism_family', 'priority_program_families', and the nested 'suggested_programs' array to propose a structural hypothesis!\n"
             "Allowed state methods: summary(), shape(), find_color(v), count(v), patch(x,y,r), "
             "diff_last_frame(), changed_cells(), color_histogram(), connected_components(color), delta_summary(), symmetry_hints(). "
             "Prefer stored evidence and reversible progress. Do not request a physical "
@@ -5231,9 +5273,18 @@ class OptionalLocalReasoner:
                     )
                 continue
             if response_type == "abduction":
-                puzzle_family = obj.get("puzzle_family")
+                puzzle_family = obj.get("mechanism_family") or obj.get("puzzle_family") or "mechanism_inference"
                 if isinstance(puzzle_family, str):
                     puzzle_family = puzzle_family.strip()
+                
+                # Store mechanism-level inferences in memory
+                if isinstance(obj.get("priority_program_families"), list):
+                    memory.priority_program_families = [str(x) for x in obj.get("priority_program_families", [])]
+                if isinstance(obj.get("invariants_to_preserve"), list):
+                    memory.invariants_to_preserve = [str(x) for x in obj.get("invariants_to_preserve", [])]
+                if obj.get("mechanism_family") in memory.mechanism_scores:
+                    memory.mechanism_scores[obj["mechanism_family"]] += 0.3
+                    
                 proposals_data = obj.get("suggested_programs")
                 if not isinstance(proposals_data, list):
                     proposals_data = []
@@ -5954,25 +6005,45 @@ class MetacognitiveController:
             return None
         return self.programs.predict_grid(scene.grid, spec, scene)
 
-    def _classify_early_mechanism(self) -> str:
-        if len(self.memory.transitions) < 3:
-            return self.memory.early_classified_mechanism or "undetermined"
+    def _update_mechanism_beliefs(self) -> None:
+        if not self.memory.transitions:
+            return
         
-        recent = list(self.memory.transitions)[-8:]
-        entity_move_count = sum(1 for t in recent if len(t.event.entity_moves) == 1)
-        gravity_count = sum(1 for t in recent if len(t.event.entity_moves) > 1)
-        topology_count = sum(1 for t in recent if t.event.topology_change)
-        color_change_count = sum(1 for t in recent if t.event.changed_count > 0 and len(t.event.entity_moves) == 0)
+        recent = list(self.memory.transitions)[-10:]
+        for t in recent:
+            moves = getattr(t.event, "entity_moves", ())
+            if len(moves) == 1:
+                self.memory.mechanism_scores["movement_control"] = min(1.0, self.memory.mechanism_scores["movement_control"] + 0.15)
+            elif len(moves) > 1:
+                self.memory.mechanism_scores["gravity_or_fall"] = min(1.0, self.memory.mechanism_scores["gravity_or_fall"] + 0.2)
+            if t.event.topology_change:
+                self.memory.mechanism_scores["topology_switch"] = min(1.0, self.memory.mechanism_scores["topology_switch"] + 0.2)
+                self.memory.mechanism_scores["line_or_beam"] = min(1.0, self.memory.mechanism_scores["line_or_beam"] + 0.15)
+            if t.event.changed_count > 0 and len(moves) == 0:
+                if t.event.changed_count <= 4:
+                    self.memory.mechanism_scores["targeted_recolor"] = min(1.0, self.memory.mechanism_scores["targeted_recolor"] + 0.15)
+                else:
+                    self.memory.mechanism_scores["flood_or_fill"] = min(1.0, self.memory.mechanism_scores["flood_or_fill"] + 0.2)
+            if t.event.disappeared_colors:
+                self.memory.mechanism_scores["component_delete"] = min(1.0, self.memory.mechanism_scores["component_delete"] + 0.2)
+                
+        # Normalize and compute top belief
+        total = sum(self.memory.mechanism_scores.values()) or 1.0
+        prev_top = self.memory.top_mechanism_family
+        sorted_fams = sorted(self.memory.mechanism_scores.items(), key=lambda x: -x[1])
+        self.memory.top_mechanism_family = sorted_fams[0][0]
+        self.memory.top_mechanism_confidence = round(sorted_fams[0][1] / max(1.0, total), 3)
+        self.memory.competing_mechanism_families = [f[0] for f in sorted_fams[:3]]
+        self.memory.early_classified_mechanism = self.memory.top_mechanism_family
         
-        if gravity_count >= 2:
-            return "physics_gravity"
-        if entity_move_count >= 2:
-            return "grid_movement"
-        if topology_count >= 2:
-            return "line_connect"
-        if color_change_count >= 2:
-            return "coloring_flood"
-        return self.memory.early_classified_mechanism or "grid_movement"
+        if prev_top != self.memory.top_mechanism_family and len(self.memory.transitions) >= 5:
+            self.memory.mechanism_shift_event = True
+            
+        # Mode management: discovery vs exploitation
+        if self.memory.top_mechanism_confidence >= 0.32 and self.steps_since_progress <= 25:
+            self.memory.mode = "exploitation_mode"
+        else:
+            self.memory.mode = "discovery_mode"
 
     def _check_severe_stagnation(self) -> tuple[bool, str]:
         target_budget = 120
@@ -6200,9 +6271,8 @@ class MetacognitiveController:
                 return spec, False, {"stage": "verified_plan_queue", "alignment": round(decision.score, 3)}
             self.plan_queue.clear()
 
-        # Early mechanism belief update
-        if step <= 8 or not self.memory.early_classified_mechanism:
-            self.memory.early_classified_mechanism = self._classify_early_mechanism()
+        # Scored mechanism belief update & mode setting
+        self._update_mechanism_beliefs()
 
         # 2a-0) Instant Reflex Fast-Path (Sub-millisecond execution for forced/unambiguous winning moves)
         active_goals = self.goals.active(limit=2)
@@ -7253,6 +7323,16 @@ class MyAgent(Agent):
             counterfactual_pruned_count=self.controller.memory.counterfactual_pruned_count,
             subgoal_distance_reward=float(self.pending_reasoning.get("subgoal_reward", 0.0)),
             negative_hypothesis_eliminations=self.controller.memory.negative_hypothesis_eliminations,
+            mode=self.controller.memory.mode,
+            top_mechanism_family=self.controller.memory.top_mechanism_family,
+            top_mechanism_confidence=self.controller.memory.top_mechanism_confidence,
+            competing_mechanism_families=self.controller.memory.competing_mechanism_families,
+            mechanism_family_scores=dict(self.controller.memory.mechanism_scores),
+            priority_program_families=list(self.controller.memory.priority_program_families),
+            invariants_to_preserve=list(self.controller.memory.invariants_to_preserve),
+            mechanism_shift_event=self.controller.memory.mechanism_shift_event,
+            mechanism_aligned_action=bool(self.pending_reasoning.get("mechanism_aligned", False)),
+            mechanism_discriminating_probe_used=bool(self.pending_reasoning.get("is_discriminating_probe", False)),
             llm_top_productive_family=max(self.controller.memory.llm_family_payoff.items(), key=lambda x: x[1].get("changed", 0))[0] if self.controller.memory.llm_family_payoff else "",
             llm_top_unproductive_family=max(self.controller.memory.llm_family_payoff.items(), key=lambda x: (x[1].get("noop", 0) + x[1].get("death", 0)))[0] if self.controller.memory.llm_family_payoff else "",
             llm_family_payoff_summary={
@@ -7508,6 +7588,16 @@ class MyAgent(Agent):
             "counterfactual_pruned_count": self.controller.memory.counterfactual_pruned_count,
             "subgoal_distance_reward": float(decision.get("subgoal_reward", 0.0)),
             "negative_hypothesis_eliminations": self.controller.memory.negative_hypothesis_eliminations,
+            "mode": self.controller.memory.mode,
+            "top_mechanism_family": self.controller.memory.top_mechanism_family,
+            "top_mechanism_confidence": self.controller.memory.top_mechanism_confidence,
+            "competing_mechanism_families": self.controller.memory.competing_mechanism_families,
+            "mechanism_family_scores": dict(self.controller.memory.mechanism_scores),
+            "priority_program_families": list(self.controller.memory.priority_program_families),
+            "invariants_to_preserve": list(self.controller.memory.invariants_to_preserve),
+            "mechanism_shift_event": self.controller.memory.mechanism_shift_event,
+            "mechanism_aligned_action": bool(decision.get("mechanism_aligned", False)),
+            "mechanism_discriminating_probe_used": bool(decision.get("is_discriminating_probe", False)),
             "llm_top_productive_family": max(self.controller.memory.llm_family_payoff.items(), key=lambda x: x[1].get("changed", 0))[0] if self.controller.memory.llm_family_payoff else "",
             "llm_top_unproductive_family": max(self.controller.memory.llm_family_payoff.items(), key=lambda x: (x[1].get("noop", 0) + x[1].get("death", 0)))[0] if self.controller.memory.llm_family_payoff else "",
             "llm_family_payoff_summary": {
