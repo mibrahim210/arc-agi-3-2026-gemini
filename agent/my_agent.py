@@ -6505,6 +6505,7 @@ class MetacognitiveController:
                             
                             model_action = proposal.action
                             if model_action is not None:
+                                is_severe_stagnation, stagnation_signal = self._check_severe_stagnation()
                                 prior_kind = proposal.program_spec.get("kind") if proposal.program_spec else None
                                 semantic_prior, semantic_reasons = self.path_planner.dynamics.prior_for_action(
                                     model_action.name, prior_kind)
@@ -6530,7 +6531,6 @@ class MetacognitiveController:
                                 is_probe = self.memory.tried_count(
                                     scene.exact_key, model_action) == 0
                                 prediction = self._predict(scene, model_action, profile)
-                                is_severe_stagnation, stagnation_signal = self._check_severe_stagnation()
                                 is_dead_sig = self.dead.is_dead(signature)
                                 
                                 self.llm_step_meta["llm_override_eligible"] = is_severe_stagnation
