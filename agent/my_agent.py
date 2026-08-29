@@ -6978,7 +6978,8 @@ class MetacognitiveController:
                 "probe_budget_used": self.memory.probes_this_level,
                 "goals": list(decision.goal_ids),
                 "rationale": best.rationale[:4],
-                "is_discriminating_probe": probe_matched or bool(self.memory.recommended_probe_type),
+                "is_discriminating_probe": probe_matched,
+                "probe_recommendation_present": bool(self.memory.recommended_probe_type),
             }
 
         # 8) Least harmful advertised action, with no invented actions.
@@ -7619,7 +7620,16 @@ class MyAgent(Agent):
 
         # Determine truthful mechanism alignment for chosen action
         chosen_source = str(decision.get("final_action_source", spec.source))
-        chosen_kind = str(decision.get("llm_family") or decision.get("program_kind") or spec.program_id or "")
+        
+        # Resolve true program family/kind from metadata or program library
+        chosen_kind = str(decision.get("llm_family") or decision.get("program_kind") or "")
+        if not chosen_kind and spec.program_id:
+            programs_lib = getattr(self.controller, "programs", None) or getattr(self, "programs", None)
+            if programs_lib is not None and hasattr(programs_lib, "programs"):
+                prog = programs_lib.programs.get(spec.program_id)
+                if prog is not None:
+                    chosen_kind = getattr(prog, "kind", "")
+
         top_fam = self.controller.memory.top_mechanism_family
         prio_fams = self.controller.memory.priority_program_families
         
