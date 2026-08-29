@@ -6384,13 +6384,15 @@ class MetacognitiveController:
         if active_goals and active_goals[0].confidence > 0.85:
             top_goal = active_goals[0]
             for action in legal_actions:
-                pred = self._predict(scene, action, profile)
+                data_tuple = tuple(sorted((k, int(v)) for k, v in action.data.items())) if getattr(action, "data", None) else ()
+                spec_cand = ActionSpec(name=action.name, data=data_tuple)
+                pred = self._predict(scene, spec_cand, profile)
                 if pred is not None:
-                    gate = self._verify(scene, action, legal_names, pred, False, profile)
-                    if gate.allowed and gate.score > 1.2 and not self.dead.is_dead(_action_signature(scene, action)):
+                    gate = self._verify(scene, spec_cand, legal_names, pred, False, profile)
+                    if gate.allowed and gate.score > 1.2 and not self.dead.is_dead(_action_signature(scene, spec_cand)):
                         spec = ActionSpec(
-                            name=action.name, data=action.data, source="instant_reflex",
-                            predicted_effect=pred.expected_effect, score=action.score + gate.score + 2.0,
+                            name=spec_cand.name, data=spec_cand.data, source="instant_reflex",
+                            predicted_effect=pred.expected_effect, score=spec_cand.score + gate.score + 2.0,
                             program_id=pred.program_id,
                             predicted_state_key=_stable_hash_bytes(pred.grid.tobytes()),
                             goal_ids=gate.goal_ids,
