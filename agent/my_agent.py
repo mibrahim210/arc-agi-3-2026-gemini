@@ -1932,7 +1932,9 @@ class TraceMemory:
         self.invariants_to_preserve: list[str] = []
         self.mechanism_shift_event: bool = False
         self.recommended_probe_type: str = ""
+        self.recommended_probe_ttl: int = 0
         self.llm_last_mechanism_confidence: float = 0.5
+        self.priority_program_ttl: int = 0
 
     def reset_level(self) -> None:
         self.transitions.clear()
@@ -1985,7 +1987,9 @@ class TraceMemory:
         self.invariants_to_preserve.clear()
         self.mechanism_shift_event = False
         self.recommended_probe_type = ""
+        self.recommended_probe_ttl = 0
         self.llm_last_mechanism_confidence = 0.5
+        self.priority_program_ttl = 0
 
     def reset_attempt(self) -> None:
         # Preserve learned transitions, state-action counts, global outcomes, and
@@ -4788,6 +4792,19 @@ class PathPlanner:
 # ---------------------------------------------------------------------------
 
 
+MECHANISM_TO_PROGRAM_KINDS: dict[str, set[str]] = {
+    "movement_control": {"translation", "drag_component", "gravity"},
+    "targeted_recolor": {"conditional_recolor", "component_recolor", "color_map"},
+    "component_delete": {"component_delete"},
+    "drag_or_push": {"drag_component", "translation"},
+    "line_or_beam": {"line_connect"},
+    "flood_or_fill": {"flood_fill", "count_and_fill"},
+    "gravity_or_fall": {"gravity", "drag_component"},
+    "copy_or_stamp": {"copy_pattern", "local_patch_replace"},
+    "count_or_trigger": {"count_and_fill", "cellular_rule"},
+    "topology_switch": {"cellular_rule", "line_connect"},
+}
+
 _OLLAMA_LOCK = threading.Lock()
 
 
@@ -5289,14 +5306,16 @@ class OptionalLocalReasoner:
                     conf = 0.5
                 memory.llm_last_mechanism_confidence = conf
 
-                # 2. Parse recommended_probe_type
+                # 2. Parse recommended_probe_type with 6-step TTL
                 rec_probe = str(obj.get("recommended_probe_type", "")).strip().lower()
                 if rec_probe:
                     memory.recommended_probe_type = rec_probe
+                    memory.recommended_probe_ttl = step + 6
 
-                # 3. Store mechanism-level inferences in memory with confidence-weighting
+                # 3. Store mechanism-level inferences in memory with confidence-weighting and 12-step TTL
                 if isinstance(obj.get("priority_program_families"), list):
                     memory.priority_program_families = [str(x) for x in obj.get("priority_program_families", [])]
+                    memory.priority_program_ttl = step + 12
                 if isinstance(obj.get("invariants_to_preserve"), list):
                     memory.invariants_to_preserve = [str(x) for x in obj.get("invariants_to_preserve", [])]
                 
@@ -6026,10 +6045,20 @@ class MetacognitiveController:
             return None
         return self.programs.predict_grid(scene.grid, spec, scene)
 
-    def _update_mechanism_beliefs(self) -> None:
+    def _update_mechanism_beliefs(self, step: int = 0) -> None:
         if not self.memory.transitions:
             return
+
+        # Stagnation / TTL decay for priority program families
+        if (self.memory.priority_program_ttl > 0 and step > self.memory.priority_program_ttl) or self.steps_since_progress >= 12:
+            self.memory.priority_program_families.clear()
+            self.memory.priority_program_ttl = 0
+
+        if self.memory.recommended_probe_ttl > 0 and step > self.memory.recommended_probe_ttl:
+            self.memory.recommended_probe_type = ""
+            self.memory.recommended_probe_ttl = 0
         
+        # Positive and negative evidence accumulation across recent transitions
         recent = list(self.memory.transitions)[-10:]
         for t in recent:
             moves = getattr(t.event, "entity_moves", ())
@@ -6037,16 +6066,29 @@ class MetacognitiveController:
                 self.memory.mechanism_scores["movement_control"] = min(1.0, self.memory.mechanism_scores["movement_control"] + 0.15)
             elif len(moves) > 1:
                 self.memory.mechanism_scores["gravity_or_fall"] = min(1.0, self.memory.mechanism_scores["gravity_or_fall"] + 0.2)
+            else:
+                # Negative evidence against movement/gravity when transitions produce 0 movement
+                self.memory.mechanism_scores["movement_control"] = max(0.02, self.memory.mechanism_scores["movement_control"] - 0.04)
+                self.memory.mechanism_scores["gravity_or_fall"] = max(0.02, self.memory.mechanism_scores["gravity_or_fall"] - 0.04)
+
             if t.event.topology_change:
                 self.memory.mechanism_scores["topology_switch"] = min(1.0, self.memory.mechanism_scores["topology_switch"] + 0.2)
                 self.memory.mechanism_scores["line_or_beam"] = min(1.0, self.memory.mechanism_scores["line_or_beam"] + 0.15)
+            
             if t.event.changed_count > 0 and len(moves) == 0:
                 if t.event.changed_count <= 4:
                     self.memory.mechanism_scores["targeted_recolor"] = min(1.0, self.memory.mechanism_scores["targeted_recolor"] + 0.15)
                 else:
                     self.memory.mechanism_scores["flood_or_fill"] = min(1.0, self.memory.mechanism_scores["flood_or_fill"] + 0.2)
+            elif t.event.changed_count == 0:
+                # Negative evidence against recolor/flood when no pixels changed
+                self.memory.mechanism_scores["targeted_recolor"] = max(0.02, self.memory.mechanism_scores["targeted_recolor"] - 0.03)
+                self.memory.mechanism_scores["flood_or_fill"] = max(0.02, self.memory.mechanism_scores["flood_or_fill"] - 0.03)
+
             if t.event.disappeared_colors:
                 self.memory.mechanism_scores["component_delete"] = min(1.0, self.memory.mechanism_scores["component_delete"] + 0.2)
+            elif t.event.changed_count > 0 and not t.event.disappeared_colors:
+                self.memory.mechanism_scores["component_delete"] = max(0.02, self.memory.mechanism_scores["component_delete"] - 0.04)
                 
         # Normalize and compute top belief
         total = sum(self.memory.mechanism_scores.values()) or 1.0
@@ -6100,14 +6142,14 @@ class MetacognitiveController:
     def _priority_family_boost(self, kind: str | None) -> float:
         if not kind or not self.memory.priority_program_families:
             return 0.0
-        if kind in self.memory.priority_program_families:
-            idx = self.memory.priority_program_families.index(kind)
-            return max(0.2, 0.8 - 0.2 * idx)
+        for idx, prio in enumerate(self.memory.priority_program_families):
+            if kind == prio or kind in MECHANISM_TO_PROGRAM_KINDS.get(prio, set()):
+                return max(0.2, 0.8 - 0.2 * idx)
         return 0.0
 
-    def _probe_matches_recommendation(self, candidate: Candidate, scene: Scene) -> tuple[bool, float]:
+    def _probe_matches_recommendation(self, candidate: Candidate, scene: Scene, step: int = 0) -> tuple[bool, float]:
         rec = self.memory.recommended_probe_type
-        if not rec:
+        if not rec or (self.memory.recommended_probe_ttl > 0 and step > self.memory.recommended_probe_ttl):
             return False, 0.0
         name = candidate.spec.name
         data = candidate.spec.data_dict
@@ -6335,7 +6377,7 @@ class MetacognitiveController:
             self.plan_queue.clear()
 
         # Scored mechanism belief update & mode setting
-        self._update_mechanism_beliefs()
+        self._update_mechanism_beliefs(step=step)
 
         # 2a-0) Instant Reflex Fast-Path (Sub-millisecond execution for forced/unambiguous winning moves)
         active_goals = self.goals.active(limit=2)
@@ -6958,7 +7000,7 @@ class MetacognitiveController:
                     continue
                 eig = self.hypotheses.information_value(
                     candidate.signature) if profile.use_hypotheses else 0.0
-                probe_matched, probe_boost = self._probe_matches_recommendation(candidate, scene)
+                probe_matched, probe_boost = self._probe_matches_recommendation(candidate, scene, step=step)
                 score = candidate.score + 0.65 * eig + decision.score - 0.45 + probe_boost
                 if self.memory.recent_state_loop(self.config.loop_window) or self.memory.no_op_streak >= self.config.no_progress_cooldown_steps:
                     score += 0.65
@@ -6966,6 +7008,8 @@ class MetacognitiveController:
         if probes:
             probes.sort(key=lambda row: row[0], reverse=True)
             score, best, decision, probe_matched = probes[0]
+            self.memory.recommended_probe_type = ""
+            self.memory.recommended_probe_ttl = 0
             spec = ActionSpec(
                 name=best.spec.name, data=best.spec.data,
                 source="goal_discriminating_probe" if profile.use_goals else "hypothesis_discriminating_probe",
@@ -7428,6 +7472,8 @@ class MyAgent(Agent):
             action_semantics_summary=dict(self.pending_reasoning.get("action_semantics", {})) if isinstance(self.pending_reasoning.get("action_semantics", {}), dict) else {"rows": self.pending_reasoning.get("action_semantics", [])},
         )
         self.diagnostic_logger.record(record)
+        # Pulse reset mechanism_shift_event so it only fires on the single shift step
+        self.controller.memory.mechanism_shift_event = False
 
         # Trace evidence showed lock-starvation in bp35; keeping strict fallback loop metrics
         self.controller.steps_since_progress += 1
@@ -7618,7 +7664,7 @@ class MyAgent(Agent):
         self.pending_signature = signature
         self.last_state = latest_frame.state
 
-        # Determine truthful mechanism alignment for chosen action
+        # Determine truthful mechanism alignment for chosen action via semantic ontology
         chosen_source = str(decision.get("final_action_source", spec.source))
         
         # Resolve true program family/kind from metadata or program library
@@ -7632,10 +7678,14 @@ class MyAgent(Agent):
 
         top_fam = self.controller.memory.top_mechanism_family
         prio_fams = self.controller.memory.priority_program_families
+        top_kinds = MECHANISM_TO_PROGRAM_KINDS.get(top_fam, set())
         
         is_mech_aligned = False
-        if chosen_kind and (chosen_kind == top_fam or chosen_kind in prio_fams):
-            is_mech_aligned = True
+        if chosen_kind:
+            if chosen_kind == top_fam or chosen_kind in top_kinds:
+                is_mech_aligned = True
+            elif any(chosen_kind == pf or chosen_kind in MECHANISM_TO_PROGRAM_KINDS.get(pf, set()) for pf in prio_fams):
+                is_mech_aligned = True
         elif top_fam == "movement_control" and spec.name in ("ACTION1", "ACTION2", "ACTION3", "ACTION4", "ACTION5"):
             is_mech_aligned = True
         elif top_fam == "targeted_recolor" and spec.name == "ACTION6":
