@@ -605,6 +605,11 @@ class DiagnosticTraceRecord:
     macro_replay_aborted_reason: str = ""
     level_transition_transfer_used: bool = False
     transferred_mechanism_family: str = ""
+    early_classified_mechanism: str = ""
+    instant_reflex_used: bool = False
+    counterfactual_pruned_count: int = 0
+    subgoal_distance_reward: float = 0.0
+    negative_hypothesis_eliminations: int = 0
     llm_top_productive_family: str = ""
     llm_top_unproductive_family: str = ""
     llm_family_payoff_summary: dict[str, Any] = field(default_factory=dict)
@@ -1900,6 +1905,9 @@ class TraceMemory:
         self.macro_replay_aborted_reason: str = ""
         self.transferred_mechanism_family: str = ""
         self.level_transition_transfer_used: bool = False
+        self.early_classified_mechanism: str = ""
+        self.counterfactual_pruned_count: int = 0
+        self.negative_hypothesis_eliminations: int = 0
 
     def reset_level(self) -> None:
         self.transitions.clear()
@@ -1929,6 +1937,9 @@ class TraceMemory:
         self.macro_replay_aborted_reason = ""
         self.transferred_mechanism_family = self.llm_recent_committed_family or "translation"
         self.level_transition_transfer_used = bool(self.transferred_mechanism_family)
+        self.early_classified_mechanism = self.transferred_mechanism_family or ""
+        self.counterfactual_pruned_count = 0
+        self.negative_hypothesis_eliminations = 0
 
     def reset_attempt(self) -> None:
         # Preserve learned transitions, state-action counts, global outcomes, and
@@ -5943,6 +5954,26 @@ class MetacognitiveController:
             return None
         return self.programs.predict_grid(scene.grid, spec, scene)
 
+    def _classify_early_mechanism(self) -> str:
+        if len(self.memory.transitions) < 3:
+            return self.memory.early_classified_mechanism or "undetermined"
+        
+        recent = list(self.memory.transitions)[-8:]
+        entity_move_count = sum(1 for t in recent if len(t.event.entity_moves) == 1)
+        gravity_count = sum(1 for t in recent if len(t.event.entity_moves) > 1)
+        topology_count = sum(1 for t in recent if t.event.topology_change)
+        color_change_count = sum(1 for t in recent if t.event.changed_count > 0 and len(t.event.entity_moves) == 0)
+        
+        if gravity_count >= 2:
+            return "physics_gravity"
+        if entity_move_count >= 2:
+            return "grid_movement"
+        if topology_count >= 2:
+            return "line_connect"
+        if color_change_count >= 2:
+            return "coloring_flood"
+        return self.memory.early_classified_mechanism or "grid_movement"
+
     def _check_severe_stagnation(self) -> tuple[bool, str]:
         target_budget = 120
         pressure = min(2.0, self.memory.level_steps / target_budget) if target_budget > 0 else 0.0
@@ -6169,6 +6200,31 @@ class MetacognitiveController:
                 return spec, False, {"stage": "verified_plan_queue", "alignment": round(decision.score, 3)}
             self.plan_queue.clear()
 
+        # Early mechanism belief update
+        if step <= 8 or not self.memory.early_classified_mechanism:
+            self.memory.early_classified_mechanism = self._classify_early_mechanism()
+
+        # 2a-0) Instant Reflex Fast-Path (Sub-millisecond execution for forced/unambiguous winning moves)
+        active_goals = self.goals.active(limit=2)
+        if active_goals and active_goals[0].confidence > 0.85:
+            top_goal = active_goals[0]
+            for action in legal_actions:
+                pred = self._predict(scene, action, profile)
+                if pred is not None:
+                    gate = self._verify(scene, action, legal_names, pred, False, profile)
+                    if gate.allowed and gate.score > 1.2 and not self.dead.is_dead(_action_signature(scene, action)):
+                        spec = ActionSpec(
+                            name=action.name, data=action.data, source="instant_reflex",
+                            predicted_effect=pred.expected_effect, score=action.score + gate.score + 2.0,
+                            program_id=pred.program_id,
+                            predicted_state_key=_stable_hash_bytes(pred.grid.tobytes()),
+                            goal_ids=gate.goal_ids,
+                        )
+                        return spec, False, {
+                            "stage": "instant_reflex", "final_action_source": "instant_reflex",
+                            "instant_reflex_used": True, "alignment": round(gate.score, 3), **self.llm_step_meta
+                        }
+
         # 2b-1) Bounded Goal-Directed Macro Replay for Productive Programs
         while self.memory.macro_replay_queue:
             queued_spec = self.memory.macro_replay_queue.popleft()
@@ -6219,7 +6275,24 @@ class MetacognitiveController:
                 decision = self._verify(scene, candidate.spec, legal_names, prediction, False, profile)
                 if not decision.allowed or self.dead.is_dead(candidate.signature):
                     continue
+                
+                # Counterfactual Sandbox: mental 1-step validation
+                if prediction is not None and prediction.grid is not None:
+                    pred_sig = _stable_hash_bytes(prediction.grid.tobytes())
+                    if self.dead.is_dead(pred_sig):
+                        self.memory.counterfactual_pruned_count += 1
+                        continue
+
                 ft_score = candidate.score + decision.score
+                
+                # Active Family Payoff & Early Mechanism Conditioning Boost
+                if prediction is not None:
+                    p_kind = getattr(prediction, 'kind', '')
+                    if p_kind == self.memory.early_classified_mechanism:
+                        ft_score += 0.8
+                    if p_kind in self.memory.llm_family_payoff:
+                        p_score = self.memory.llm_family_payoff[p_kind].get("changed", 0) + 3 * self.memory.llm_family_payoff[p_kind].get("progress", 0) - self.memory.llm_family_payoff[p_kind].get("noop", 0)
+                        ft_score += max(-1.0, min(1.5, 0.1 * p_score))
                 if prediction is not None and prediction.kind == ft_family:
                     ft_score += 0.8
                 if prediction is not None and prediction.program_id in ft_programs:
@@ -7175,6 +7248,11 @@ class MyAgent(Agent):
             macro_replay_aborted_reason=self.controller.memory.macro_replay_aborted_reason,
             level_transition_transfer_used=self.controller.memory.level_transition_transfer_used,
             transferred_mechanism_family=self.controller.memory.transferred_mechanism_family,
+            early_classified_mechanism=self.controller.memory.early_classified_mechanism,
+            instant_reflex_used=bool(self.pending_reasoning.get("instant_reflex_used", False)),
+            counterfactual_pruned_count=self.controller.memory.counterfactual_pruned_count,
+            subgoal_distance_reward=float(self.pending_reasoning.get("subgoal_reward", 0.0)),
+            negative_hypothesis_eliminations=self.controller.memory.negative_hypothesis_eliminations,
             llm_top_productive_family=max(self.controller.memory.llm_family_payoff.items(), key=lambda x: x[1].get("changed", 0))[0] if self.controller.memory.llm_family_payoff else "",
             llm_top_unproductive_family=max(self.controller.memory.llm_family_payoff.items(), key=lambda x: (x[1].get("noop", 0) + x[1].get("death", 0)))[0] if self.controller.memory.llm_family_payoff else "",
             llm_family_payoff_summary={
@@ -7425,6 +7503,11 @@ class MyAgent(Agent):
             "macro_replay_aborted_reason": self.controller.memory.macro_replay_aborted_reason,
             "level_transition_transfer_used": self.controller.memory.level_transition_transfer_used,
             "transferred_mechanism_family": self.controller.memory.transferred_mechanism_family,
+            "early_classified_mechanism": self.controller.memory.early_classified_mechanism,
+            "instant_reflex_used": bool(decision.get("instant_reflex_used", False)),
+            "counterfactual_pruned_count": self.controller.memory.counterfactual_pruned_count,
+            "subgoal_distance_reward": float(decision.get("subgoal_reward", 0.0)),
+            "negative_hypothesis_eliminations": self.controller.memory.negative_hypothesis_eliminations,
             "llm_top_productive_family": max(self.controller.memory.llm_family_payoff.items(), key=lambda x: x[1].get("changed", 0))[0] if self.controller.memory.llm_family_payoff else "",
             "llm_top_unproductive_family": max(self.controller.memory.llm_family_payoff.items(), key=lambda x: (x[1].get("noop", 0) + x[1].get("death", 0)))[0] if self.controller.memory.llm_family_payoff else "",
             "llm_family_payoff_summary": {
