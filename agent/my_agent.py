@@ -1931,6 +1931,8 @@ class TraceMemory:
         self.priority_program_families: list[str] = ["translation", "conditional_recolor"]
         self.invariants_to_preserve: list[str] = []
         self.mechanism_shift_event: bool = False
+        self.recommended_probe_type: str = ""
+        self.llm_last_mechanism_confidence: float = 0.5
 
     def reset_level(self) -> None:
         self.transitions.clear()
@@ -1982,6 +1984,8 @@ class TraceMemory:
         self.priority_program_families = []
         self.invariants_to_preserve.clear()
         self.mechanism_shift_event = False
+        self.recommended_probe_type = ""
+        self.llm_last_mechanism_confidence = 0.5
 
     def reset_attempt(self) -> None:
         # Preserve learned transitions, state-action counts, global outcomes, and
@@ -5277,13 +5281,30 @@ class OptionalLocalReasoner:
                 if isinstance(puzzle_family, str):
                     puzzle_family = puzzle_family.strip()
                 
-                # Store mechanism-level inferences in memory
+                # 1. Parse mechanism_confidence
+                try:
+                    conf = float(obj.get("mechanism_confidence", 0.5))
+                    conf = max(0.0, min(1.0, conf))
+                except (ValueError, TypeError):
+                    conf = 0.5
+                memory.llm_last_mechanism_confidence = conf
+
+                # 2. Parse recommended_probe_type
+                rec_probe = str(obj.get("recommended_probe_type", "")).strip().lower()
+                if rec_probe:
+                    memory.recommended_probe_type = rec_probe
+
+                # 3. Store mechanism-level inferences in memory with confidence-weighting
                 if isinstance(obj.get("priority_program_families"), list):
                     memory.priority_program_families = [str(x) for x in obj.get("priority_program_families", [])]
                 if isinstance(obj.get("invariants_to_preserve"), list):
                     memory.invariants_to_preserve = [str(x) for x in obj.get("invariants_to_preserve", [])]
-                if obj.get("mechanism_family") in memory.mechanism_scores:
-                    memory.mechanism_scores[obj["mechanism_family"]] += 0.3
+                
+                mech_fam = str(obj.get("mechanism_family", "")).strip()
+                if mech_fam in memory.mechanism_scores:
+                    # Bounded confidence-weighted evidence bump (0.05 for 0.1 conf up to 0.40 for 1.0 conf)
+                    bump = max(0.05, min(0.40, 0.40 * conf))
+                    memory.mechanism_scores[mech_fam] = min(1.0, memory.mechanism_scores[mech_fam] + bump)
                     
                 proposals_data = obj.get("suggested_programs")
                 if not isinstance(proposals_data, list):
@@ -6076,6 +6097,48 @@ class MetacognitiveController:
             return True, "progressless_churn"
         return False, ""
 
+    def _priority_family_boost(self, kind: str | None) -> float:
+        if not kind or not self.memory.priority_program_families:
+            return 0.0
+        if kind in self.memory.priority_program_families:
+            idx = self.memory.priority_program_families.index(kind)
+            return max(0.2, 0.8 - 0.2 * idx)
+        return 0.0
+
+    def _probe_matches_recommendation(self, candidate: Candidate, scene: Scene) -> tuple[bool, float]:
+        rec = self.memory.recommended_probe_type
+        if not rec:
+            return False, 0.0
+        name = candidate.spec.name
+        data = candidate.spec.data_dict
+        x, y = data.get("x"), data.get("y")
+        matched = False
+        
+        if rec == "directional_move":
+            if name in ("ACTION1", "ACTION2", "ACTION3", "ACTION4", "ACTION5", "ACTION7", "ACTION8"):
+                matched = True
+        elif rec == "targeted_click":
+            if name == "ACTION6" and x is not None and y is not None:
+                matched = True
+        elif rec == "boundary_test":
+            if x is not None and y is not None and (x == 0 or x == scene.width - 1 or y == 0 or y == scene.height - 1):
+                matched = True
+        elif rec == "component_interaction":
+            if x is not None and y is not None and (0 <= x < scene.width and 0 <= y < scene.height):
+                if scene.grid[y, x] != scene.background:
+                    matched = True
+        elif rec == "color_trigger":
+            if x is not None and y is not None and (0 <= x < scene.width and 0 <= y < scene.height):
+                counts = dict(scene.color_counts)
+                c = scene.grid[y, x]
+                if c != scene.background and counts.get(c, 999) <= 12:
+                    matched = True
+        elif rec == "topology_test":
+            if name in ("ACTION6", "ACTION3", "ACTION5"):
+                matched = True
+                
+        return matched, (0.75 if matched else 0.0)
+
     def _verify(
         self,
         scene: Scene,
@@ -6367,6 +6430,8 @@ class MetacognitiveController:
                     ft_score += 0.8
                 if prediction is not None and prediction.program_id in ft_programs:
                     ft_score += 1.0
+                if prediction is not None:
+                    ft_score += self._priority_family_boost(prediction.kind)
                 if ft_coords and candidate.spec.data:
                     cx, cy = candidate.spec.data_dict.get("x"), candidate.spec.data_dict.get("y")
                     if cx is not None and cy is not None:
@@ -6565,6 +6630,10 @@ class MetacognitiveController:
             score, decision, prediction = self._aligned_known_candidate(
                 scene, candidate, legal_names, profile)
             if decision.allowed and not candidate.is_probe:
+                if prediction is not None:
+                    score += self._priority_family_boost(prediction.kind)
+                    if prediction.kind == self.memory.top_mechanism_family:
+                        score += 0.8
                 ranked.append((score, candidate, decision, prediction))
         if ranked:
             ranked.sort(key=lambda row: row[0], reverse=True)
@@ -6828,7 +6897,7 @@ class MetacognitiveController:
                                     if fam != "none":
                                         self.reasoner.failed_verifications.pop((fam, model_action.name), None)
                                         
-                                    score = model_action.score + decision.score + semantic_prior
+                                    score = model_action.score + decision.score + semantic_prior + self._priority_family_boost(prior_kind)
                                     if score > best_score:
                                         best_score = score
                                         best_spec = ActionSpec(
@@ -6889,13 +6958,14 @@ class MetacognitiveController:
                     continue
                 eig = self.hypotheses.information_value(
                     candidate.signature) if profile.use_hypotheses else 0.0
-                score = candidate.score + 0.65 * eig + decision.score - 0.45
+                probe_matched, probe_boost = self._probe_matches_recommendation(candidate, scene)
+                score = candidate.score + 0.65 * eig + decision.score - 0.45 + probe_boost
                 if self.memory.recent_state_loop(self.config.loop_window) or self.memory.no_op_streak >= self.config.no_progress_cooldown_steps:
                     score += 0.65
-                probes.append((score, candidate, decision))
+                probes.append((score, candidate, decision, probe_matched))
         if probes:
             probes.sort(key=lambda row: row[0], reverse=True)
-            score, best, decision = probes[0]
+            score, best, decision, probe_matched = probes[0]
             spec = ActionSpec(
                 name=best.spec.name, data=best.spec.data,
                 source="goal_discriminating_probe" if profile.use_goals else "hypothesis_discriminating_probe",
@@ -6908,6 +6978,7 @@ class MetacognitiveController:
                 "probe_budget_used": self.memory.probes_this_level,
                 "goals": list(decision.goal_ids),
                 "rationale": best.rationale[:4],
+                "is_discriminating_probe": probe_matched or bool(self.memory.recommended_probe_type),
             }
 
         # 8) Least harmful advertised action, with no invented actions.
@@ -7545,6 +7616,24 @@ class MyAgent(Agent):
         self.pending_was_probe = was_probe
         self.pending_signature = signature
         self.last_state = latest_frame.state
+
+        # Determine truthful mechanism alignment for chosen action
+        chosen_source = str(decision.get("final_action_source", spec.source))
+        chosen_kind = str(decision.get("llm_family") or decision.get("program_kind") or spec.program_id or "")
+        top_fam = self.controller.memory.top_mechanism_family
+        prio_fams = self.controller.memory.priority_program_families
+        
+        is_mech_aligned = False
+        if chosen_kind and (chosen_kind == top_fam or chosen_kind in prio_fams):
+            is_mech_aligned = True
+        elif top_fam == "movement_control" and spec.name in ("ACTION1", "ACTION2", "ACTION3", "ACTION4", "ACTION5"):
+            is_mech_aligned = True
+        elif top_fam == "targeted_recolor" and spec.name == "ACTION6":
+            is_mech_aligned = True
+        elif chosen_source in ("macro_replay", "llm_follow_through", "instant_reflex"):
+            is_mech_aligned = True
+            
+        decision["mechanism_aligned"] = is_mech_aligned
 
         reasoning: dict[str, Any] = {
             **self.controller.llm_step_meta,
