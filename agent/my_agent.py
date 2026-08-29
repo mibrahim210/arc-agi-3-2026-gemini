@@ -591,6 +591,7 @@ class DiagnosticTraceRecord:
     llm_follow_through_family: str = ""
     llm_promoted_programs_count: int = 0
     churn_stagnation_detected: bool = False
+    follow_through_led_to_progress: bool = False
     llm_top_productive_family: str = ""
     llm_top_unproductive_family: str = ""
     llm_family_payoff_summary: dict[str, Any] = field(default_factory=dict)
@@ -1875,6 +1876,8 @@ class TraceMemory:
         self.llm_recent_committed_family: str = ""
         self.llm_family_cooldown: dict[str, int] = defaultdict(int)
         self.llm_promoted_program_ids: set[str] = set()
+        self.llm_follow_through_recent_steps: int = 0
+        self.follow_through_led_to_progress: bool = False
 
     def reset_level(self) -> None:
         self.transitions.clear()
@@ -1893,6 +1896,8 @@ class TraceMemory:
         self.llm_recent_committed_family = ""
         self.llm_family_cooldown.clear()
         self.llm_promoted_program_ids.clear()
+        self.llm_follow_through_recent_steps = 0
+        self.follow_through_led_to_progress = False
 
     def reset_attempt(self) -> None:
         # Preserve learned transitions, state-action counts, global outcomes, and
@@ -6136,17 +6141,17 @@ class MetacognitiveController:
                     continue
                 ft_score = candidate.score + decision.score
                 if prediction is not None and prediction.kind == ft_family:
-                    ft_score += 0.5
+                    ft_score += 0.8
                 if prediction is not None and prediction.program_id in ft_programs:
-                    ft_score += 0.6
+                    ft_score += 1.0
                 if ft_coords and candidate.spec.data:
                     cx, cy = candidate.spec.data_dict.get("x"), candidate.spec.data_dict.get("y")
                     if cx is not None and cy is not None:
                         dist = max(abs(cx - ft_coords[0]), abs(cy - ft_coords[1]))
                         if dist <= 2:
-                            ft_score += 0.4
+                            ft_score += 0.6
                         elif cx == ft_coords[0] or cy == ft_coords[1]:
-                            ft_score += 0.2
+                            ft_score += 0.3
                 ft_candidates.append((ft_score, candidate, decision, prediction))
             if ft_candidates:
                 ft_candidates.sort(key=lambda row: row[0], reverse=True)
@@ -6947,7 +6952,15 @@ class MyAgent(Agent):
             if event.level_delta > 0 or event.win:
                 self.memory.llm_family_payoff[fam]["progress"] += 1
         else:
+            if self.pending_reasoning.get("final_action_source") == "llm_follow_through":
+                self.memory.llm_follow_through_recent_steps = 4
             self.memory.llm_follow_through_window = max(0, self.memory.llm_follow_through_window - 1)
+        
+        # Check if recent follow-through activity produced progress
+        if self.memory.llm_follow_through_recent_steps > 0:
+            if event.level_delta > 0 or event.win:
+                self.memory.follow_through_led_to_progress = True
+            self.memory.llm_follow_through_recent_steps -= 1
         if profile.learn_hypotheses:
             self.hypotheses.record(self.pending_signature, event)
         self.world_model.record(transition)
@@ -7052,6 +7065,7 @@ class MyAgent(Agent):
             llm_follow_through_family=self.controller.memory.llm_follow_through_family,
             llm_promoted_programs_count=len(self.controller.memory.llm_promoted_program_ids),
             churn_stagnation_detected=self.controller.llm_step_meta.get("llm_severe_stagnation_signal") == "progressless_churn",
+            follow_through_led_to_progress=self.controller.memory.follow_through_led_to_progress,
             llm_top_productive_family=max(self.controller.memory.llm_family_payoff.items(), key=lambda x: x[1].get("changed", 0))[0] if self.controller.memory.llm_family_payoff else "",
             llm_top_unproductive_family=max(self.controller.memory.llm_family_payoff.items(), key=lambda x: (x[1].get("noop", 0) + x[1].get("death", 0)))[0] if self.controller.memory.llm_family_payoff else "",
             llm_family_payoff_summary={
@@ -7288,6 +7302,7 @@ class MyAgent(Agent):
             "llm_follow_through_family": self.controller.memory.llm_follow_through_family,
             "llm_promoted_programs_count": len(self.controller.memory.llm_promoted_program_ids),
             "churn_stagnation_detected": self.controller.llm_step_meta.get("llm_severe_stagnation_signal") == "progressless_churn",
+            "follow_through_led_to_progress": self.controller.memory.follow_through_led_to_progress,
             "llm_top_productive_family": max(self.controller.memory.llm_family_payoff.items(), key=lambda x: x[1].get("changed", 0))[0] if self.controller.memory.llm_family_payoff else "",
             "llm_top_unproductive_family": max(self.controller.memory.llm_family_payoff.items(), key=lambda x: (x[1].get("noop", 0) + x[1].get("death", 0)))[0] if self.controller.memory.llm_family_payoff else "",
             "llm_family_payoff_summary": {
