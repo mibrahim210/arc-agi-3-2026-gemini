@@ -647,8 +647,10 @@ class DiagnosticTraceRecord:
     regrounding_confidence: float = 0.0
     regrounding_used: bool = False
     regrounding_failed_reason: str = ""
+    levelup_relocalization_llm_attempted: bool = False
     levelup_relocalization_llm_used: bool = False
     levelup_relocalization_llm_confidence: float = 0.0
+    exploitation_noop_blacklist_checks: int = 0
     exploitation_noop_blacklist_hits: int = 0
     mechanism_detector_triggered: str = ""
 
@@ -1987,10 +1989,12 @@ class TraceMemory:
         self.regrounding_confidence: float = 0.0
         self.regrounding_used: bool = False
         self.regrounding_failed_reason: str = ""
+        self.levelup_relocalization_llm_attempted: bool = False
         self.levelup_relocalization_llm_used: bool = False
         self.levelup_relocalization_llm_confidence: float = 0.0
         self.exploitation_noop_blacklist: set[tuple[str, int, int]] = set()
         self.exploitation_noop_neighborhood_blacklist: set[tuple[int, int]] = set()
+        self.exploitation_noop_blacklist_checks: int = 0
         self.exploitation_noop_blacklist_hits: int = 0
         self.mechanism_detector_triggered: str = ""
 
@@ -5733,6 +5737,7 @@ class CandidateGenerator:
             if action.is_complex():
                 for coord_score, (x, y), why in self._complex_coordinates(scene):
                     if (self.memory.mode == "exploitation_mode" or self.memory.post_breakthrough_window_active):
+                        self.memory.exploitation_noop_blacklist_checks += 1
                         if (action.name, x, y) in self.memory.exploitation_noop_blacklist or (x, y) in self.memory.exploitation_noop_neighborhood_blacklist:
                             self.memory.exploitation_noop_blacklist_hits += 1
                             continue
@@ -6812,18 +6817,25 @@ class MetacognitiveController:
 
             # 0b) Bounded LLM Relocalization if component re-grounding is ambiguous
             if (regrounded is None or r_conf < 0.60) and profile.use_model and remaining_sec is not None and remaining_sec > 90.0 and not _OLLAMA_LOCK.locked():
+                self.memory.levelup_relocalization_llm_attempted = True
                 win_pattern = {
                     "action": self.memory.transferred_winning_action_name,
                     "coords": self.memory.last_winning_coords,
                     "family": self.memory.transferred_winning_family,
                 }
                 reloc = self.reasoner.propose_relocalization(scene, win_pattern)
-                if reloc is not None and reloc.get("confidence", 0.0) >= 0.50:
+                if reloc is None:
+                    self.memory.regrounding_failed_reason = "llm_relocalization_no_response"
+                elif reloc.get("confidence", 0.0) < 0.50:
+                    self.memory.regrounding_failed_reason = "llm_relocalization_low_confidence"
+                    self.memory.levelup_relocalization_llm_confidence = float(reloc.get("confidence", 0.0))
+                else:
                     self.memory.regrounded_winning_coords = (reloc["x"], reloc["y"])
                     self.memory.transferred_winning_coords = (reloc["x"], reloc["y"])
                     self.memory.levelup_relocalization_llm_used = True
-                    self.memory.levelup_relocalization_llm_confidence = reloc["confidence"]
+                    self.memory.levelup_relocalization_llm_confidence = float(reloc["confidence"])
                     self.memory.regrounding_used = True
+                    self.memory.regrounding_failed_reason = "llm_relocalization_success" 
 
         # 2a-0) Instant Reflex Fast-Path (Sub-millisecond execution for forced/unambiguous winning moves)
         active_goals = self.goals.active(limit=2)
@@ -6873,6 +6885,11 @@ class MetacognitiveController:
                 predicted_state_key=None if prediction is None else _stable_hash_bytes(prediction.grid.tobytes()),
                 goal_ids=decision.goal_ids,
             )
+            applied_macro_bias = False
+            if self.memory.post_breakthrough_window_active:
+                if queued_spec.name == self.memory.transferred_winning_action_name or self.memory.macro_replay_family == self.memory.transferred_winning_family:
+                    self.memory.post_breakthrough_bias_used = True
+                    applied_macro_bias = True
             return spec, False, {
                 "stage": "macro_replay",
                 "final_action_source": "macro_replay",
@@ -6880,6 +6897,7 @@ class MetacognitiveController:
                 "macro_replay_family": self.memory.macro_replay_family,
                 "macro_replay_program_id": self.memory.macro_replay_program_id,
                 "macro_replay_steps_remaining": len(self.memory.macro_replay_queue),
+                "post_breakthrough_bias_used": applied_macro_bias,
                 **self.llm_step_meta
             }
 
@@ -6976,6 +6994,8 @@ class MetacognitiveController:
                     c_dict = dict(candidate.spec.data)
                     cx, cy = c_dict.get("x"), c_dict.get("y")
                     if cx is not None and cy is not None:
+                        if (self.memory.mode == "exploitation_mode" or self.memory.post_breakthrough_window_active):
+                            self.memory.exploitation_noop_blacklist_checks += 1
                         if (candidate.spec.name, cx, cy) in self.memory.exploitation_noop_blacklist:
                             self.memory.exploitation_noop_blacklist_hits += 1
                             continue
@@ -7103,6 +7123,15 @@ class MetacognitiveController:
             if cf_plan.prediction is not None and cf_plan.first_action is not None and (self.counterfactual_streak < 15 or profile.use_programs):
                 self.counterfactual_streak += 1
                 self.plan_queue.extend(cf_plan.remaining)
+                applied_cf_bias = False
+                if self.memory.post_breakthrough_window_active:
+                    p_kind = getattr(cf_plan.prediction, "kind", "")
+                    if p_kind and (p_kind == self.memory.transferred_winning_program_kind or p_kind == self.memory.transferred_winning_family):
+                        self.memory.post_breakthrough_bias_used = True
+                        applied_cf_bias = True
+                    elif cf_plan.first_action.name == self.memory.transferred_winning_action_name:
+                        self.memory.post_breakthrough_bias_used = True
+                        applied_cf_bias = True
                 stage_name = "counterfactual_program_search" if profile.use_programs and not self.dead.is_dead("counterfactual_program_search") and self.counterfactual_streak < 15 else "counterfactual_fallback"
                 return cf_plan.first_action, False, {
                     "stage": stage_name,
@@ -7113,6 +7142,7 @@ class MetacognitiveController:
                     "goal_delta": round(cf_plan.alignment.goal_delta, 3),
                     "goals": list(cf_plan.alignment.goal_ids),
                     "plan_length": 1 + len(cf_plan.remaining),
+                    "post_breakthrough_bias_used": applied_cf_bias,
                 }
         else:
             self.counterfactual_streak = 0
@@ -8067,8 +8097,10 @@ class MyAgent(Agent):
             regrounding_confidence=float(self.memory.regrounding_confidence),
             regrounding_used=bool(self.memory.regrounding_used),
             regrounding_failed_reason=str(self.memory.regrounding_failed_reason),
+            levelup_relocalization_llm_attempted=bool(self.memory.levelup_relocalization_llm_attempted),
             levelup_relocalization_llm_used=bool(self.memory.levelup_relocalization_llm_used),
             levelup_relocalization_llm_confidence=float(self.memory.levelup_relocalization_llm_confidence),
+            exploitation_noop_blacklist_checks=int(self.memory.exploitation_noop_blacklist_checks),
             exploitation_noop_blacklist_hits=int(self.memory.exploitation_noop_blacklist_hits),
             mechanism_detector_triggered=str(self.memory.mechanism_detector_triggered),
             llm_top_productive_family=max(self.controller.memory.llm_family_payoff.items(), key=lambda x: x[1].get("changed", 0))[0] if self.controller.memory.llm_family_payoff else "",
