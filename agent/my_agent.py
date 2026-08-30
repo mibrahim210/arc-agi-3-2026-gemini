@@ -655,6 +655,12 @@ class DiagnosticTraceRecord:
     mechanism_family_promoted: str = ""
     component_delete_component_locked: bool = False
     line_beam_structured_candidates_used: bool = False
+    counterfactual_completion_bias: float = 0.0
+    terminal_condition_bonus: float = 0.0
+    mechanism_completion_bonus: float = 0.0
+    productive_search_convergence_pressure: float = 0.0
+    line_beam_closure_bias_used: bool = False
+    component_delete_payoff_bias_used: bool = False
     regrounded_winning_coords: Any = None
     regrounding_delta: Any = None
     regrounding_confidence: float = 0.0
@@ -2009,6 +2015,12 @@ class TraceMemory:
         self.mechanism_family_promoted: str = ""
         self.component_delete_component_locked: bool = False
         self.line_beam_structured_candidates_used: bool = False
+        self.counterfactual_completion_bias: float = 0.0
+        self.terminal_condition_bonus: float = 0.0
+        self.mechanism_completion_bonus: float = 0.0
+        self.productive_search_convergence_pressure: float = 0.0
+        self.line_beam_closure_bias_used: bool = False
+        self.component_delete_payoff_bias_used: bool = False
         self.family_stagnation_steps: dict[str, int] = {}
         self.regrounded_winning_coords: tuple[int, int] | None = None
         self.regrounding_delta: tuple[int, int] | None = None
@@ -5718,21 +5730,25 @@ class CandidateGenerator:
                 proposals.append(
                     (1.2 + rarity - 0.12 * self.coordinate_visits[point], point, "raw_rare_color"))
 
-        # Component-Delete Coordinate Hardening: Restrict to active non-background connected components
+        # Component-Delete Coordinate Hardening: Restrict to active non-background connected components with payoff ranking
         is_comp_delete = (self.memory.top_mechanism_family == "component_delete" and self.memory.top_mechanism_confidence >= 0.28 and len(self.memory.transitions) >= 4)
         if is_comp_delete:
             self.memory.component_delete_component_locked = True
-            for comp in scene.components:
+            # Sort components: small isolated components first (highest payoff)
+            sorted_comps = sorted(scene.components, key=lambda c: c.area)
+            for comp in sorted_comps:
                 if comp.color != scene.background:
+                    size_bonus = 1.0 if comp.area <= 4 else (0.5 if comp.area <= 12 else 0.0)
                     cx, cy = int(round(comp.centroid[0])), int(round(comp.centroid[1]))
-                    proposals.append((3.2 - 0.15 * self.coordinate_visits[(cx, cy)], (cx, cy), "comp_delete_live_centroid"))
+                    proposals.append((3.2 + size_bonus - 0.15 * self.coordinate_visits[(cx, cy)], (cx, cy), "comp_delete_live_centroid"))
                     x0, y0, x1, y1 = comp.bbox
                     bx, by = (x0 + x1) // 2, (y0 + y1) // 2
-                    proposals.append((3.0 - 0.15 * self.coordinate_visits[(bx, by)], (bx, by), "comp_delete_live_bbox_center"))
+                    proposals.append((3.0 + size_bonus - 0.15 * self.coordinate_visits[(bx, by)], (bx, by), "comp_delete_live_bbox_center"))
                     for cell in comp.cells[:6]:
-                        proposals.append((2.8 - 0.15 * self.coordinate_visits[cell], cell, "comp_delete_live_cell"))
+                        proposals.append((2.8 + size_bonus - 0.15 * self.coordinate_visits[cell], cell, "comp_delete_live_cell"))
+                    self.memory.component_delete_payoff_bias_used = True
 
-        # Structured Line-or-Beam Proposals: Interpolate ray/axis coordinates between matching endpoints
+        # Structured Line-or-Beam Proposals: Interpolate ray/axis coordinates between matching endpoints and corner closures
         is_line_beam = (self.memory.top_mechanism_family == "line_or_beam" and self.memory.top_mechanism_confidence >= 0.28 and len(self.memory.transitions) >= 4)
         if is_line_beam:
             self.memory.line_beam_structured_candidates_used = True
@@ -5748,16 +5764,23 @@ class CandidateGenerator:
                             min_y, max_y = min(p1_y, p2_y), max(p1_y, p2_y)
                             for y_mid in range(min_y, max_y + 1):
                                 p = (p1_x, y_mid)
-                                score = 2.6 - 0.12 * self.coordinate_visits[p]
+                                score = 2.8 - 0.12 * self.coordinate_visits[p]
                                 proposals.append((score, p, "line_beam_collinear_y"))
                         elif p1_y == p2_y:
                             min_x, max_x = min(p1_x, p2_x), max(p1_x, p2_x)
                             for x_mid in range(min_x, max_x + 1):
                                 p = (x_mid, p1_y)
-                                score = 2.6 - 0.12 * self.coordinate_visits[p]
+                                score = 2.8 - 0.12 * self.coordinate_visits[p]
                                 proposals.append((score, p, "line_beam_collinear_x"))
+                        else:
+                            # Orthogonal L-junction corner closure candidates
+                            p_c1 = (p1_x, p2_y)
+                            p_c2 = (p2_x, p1_y)
+                            proposals.append((2.6 - 0.12 * self.coordinate_visits[p_c1], p_c1, "line_beam_corner_closure"))
+                            proposals.append((2.6 - 0.12 * self.coordinate_visits[p_c2], p_c2, "line_beam_corner_closure"))
                         mid = ((p1_x + p2_x) // 2, (p1_y + p2_y) // 2)
-                        proposals.append((2.8 - 0.12 * self.coordinate_visits[mid], mid, "line_beam_midpoint"))
+                        proposals.append((3.0 - 0.12 * self.coordinate_visits[mid], mid, "line_beam_midpoint"))
+                        self.memory.line_beam_closure_bias_used = True
 
         # Pair Midpoints for rare matching color pairs (Symmetry / Alignment Anchors)
         for color, count in scene.color_counts:
@@ -6037,6 +6060,75 @@ class CounterfactualPlan:
     alignment: AlignmentDecision
 
 
+
+def _evaluate_state_completion_and_terminal(
+    grid: np.ndarray,
+    prev_grid: np.ndarray,
+    scene: Scene,
+    top_mechanism_family: str,
+    cand_spec: ActionSpec | None = None,
+) -> tuple[float, float, bool, bool]:
+    """
+    Evaluates completion progress, closure, and terminal conditions for a predicted grid.
+    Returns: (completion_bonus, terminal_bonus, line_closure_used, delete_payoff_used)
+    """
+    comp_bonus = 0.0
+    term_bonus = 0.0
+    closure_used = False
+    payoff_used = False
+
+    bg = scene.background
+    if top_mechanism_family == "component_delete":
+        # Measure non-background mass and live components
+        prev_non_bg = np.count_nonzero(prev_grid != bg)
+        curr_non_bg = np.count_nonzero(grid != bg)
+        if curr_non_bg < prev_non_bg:
+            reduction = prev_non_bg - curr_non_bg
+            comp_bonus += min(3.0, 1.0 + 0.2 * reduction)
+            payoff_used = True
+        # Terminal condition: clean or nearly clean board
+        if curr_non_bg <= 3 and curr_non_bg < prev_non_bg:
+            term_bonus += 4.5
+        elif curr_non_bg <= 8:
+            term_bonus += 2.5
+
+    elif top_mechanism_family == "line_or_beam":
+        # Check alignment / span closure
+        if cand_spec and cand_spec.data:
+            c_dict = dict(cand_spec.data)
+            cx, cy = c_dict.get("x"), c_dict.get("y")
+            if cx is not None and cy is not None and 0 <= cx < grid.shape[1] and 0 <= cy < grid.shape[0]:
+                # Reward placement along continuous row/col spans
+                col_match = np.count_nonzero(grid[:, cx] != bg)
+                row_match = np.count_nonzero(grid[cy, :] != bg)
+                if col_match >= 3 or row_match >= 3:
+                    comp_bonus += 2.2
+                    closure_used = True
+        # Terminal condition: fully connected beam/path (few remaining disconnected endpoints)
+        if np.count_nonzero(grid != prev_grid) > 0 and closure_used:
+            term_bonus += 3.0
+
+    elif top_mechanism_family == "targeted_recolor":
+        prev_colors = set(np.unique(prev_grid)) - {bg}
+        curr_colors = set(np.unique(grid)) - {bg}
+        if len(curr_colors) < len(prev_colors):
+            comp_bonus += 2.4
+        if len(curr_colors) <= 2 and len(curr_colors) < len(prev_colors):
+            term_bonus += 3.5
+
+    elif top_mechanism_family in ("movement_control", "drag_or_push"):
+        if np.count_nonzero(grid != prev_grid) > 0:
+            comp_bonus += 1.5
+            # Terminal condition: displacement to boundary or socket
+            if cand_spec and cand_spec.data:
+                c_dict = dict(cand_spec.data)
+                cx, cy = c_dict.get("x"), c_dict.get("y")
+                if cx is not None and cy is not None:
+                    if cx in (0, grid.shape[1] - 1) or cy in (0, grid.shape[0] - 1):
+                        term_bonus += 2.0
+
+    return comp_bonus, term_bonus, closure_used, payoff_used
+
 class CounterfactualPlanner:
     """Bounded beam search through verified programs on previously unseen states."""
 
@@ -6114,6 +6206,11 @@ class CounterfactualPlanner:
                     goal_delta = self.goals.prediction_delta(
                         scene, prediction.grid)
                     novelty = 0.08 * depth
+                    # Mechanism completion and terminal condition scoring
+                    top_fam = getattr(self, "memory", None).top_mechanism_family if hasattr(self, "memory") else ""
+                    comp_bonus, term_bonus, closure_used, payoff_used = _evaluate_state_completion_and_terminal(
+                        prediction.grid, grid, scene, top_fam, action
+                    )
                     step_score = (
                         parent_score
                         + 2.4 * goal_delta
@@ -6121,6 +6218,8 @@ class CounterfactualPlanner:
                         - 0.32 * depth
                         - 0.8 * prediction.uncertainty
                         + novelty
+                        + comp_bonus
+                        + term_bonus
                     )
                     decision = self.alignment.verify(scene, first_action, legal_names, prediction if depth == 1 else self.programs.predict_grid(
                         scene.grid, first_action, scene), False)
@@ -6715,6 +6814,11 @@ class MetacognitiveController:
                             step_reward += 6.0
                         if pred.grid is not None and not np.array_equal(pred.grid, b_grid):
                             step_reward += 1.5
+                            # Add completion and terminal condition bonuses to deep search
+                            c_bonus, t_bonus, _, _ = _evaluate_state_completion_and_terminal(
+                                pred.grid, b_grid, sub_scene, top_fam, s_cand.spec
+                            )
+                            step_reward += (c_bonus + t_bonus)
                     else:
                         step_reward += 0.5
                     
@@ -6901,6 +7005,12 @@ class MetacognitiveController:
         self.memory.mechanism_family_promoted = ""
         self.memory.component_delete_component_locked = False
         self.memory.line_beam_structured_candidates_used = False
+        self.memory.counterfactual_completion_bias = 0.0
+        self.memory.terminal_condition_bonus = 0.0
+        self.memory.mechanism_completion_bonus = 0.0
+        self.memory.productive_search_convergence_pressure = 0.0
+        self.memory.line_beam_closure_bias_used = False
+        self.memory.component_delete_payoff_bias_used = False
         self.llm_step_meta = {
             "reasoner_consulted_this_step": False,
             "reasoner_parsed_abduction_this_step": False,
@@ -6950,16 +7060,20 @@ class MetacognitiveController:
             queued = self.plan_queue.popleft()
             if queued.name not in legal_names:
                 continue
+            signature = _action_signature(scene, queued)
+            if self.dead.is_dead(signature):
+                self.plan_queue.clear()
+                continue
             prediction = self._predict(scene, queued, profile)
             decision = self._verify(
-                scene, queued, legal_names, prediction, False, profile)
-            if decision.allowed and prediction is not None:
+                scene, queued, legal_names, prediction, prediction is None, profile)
+            if decision.allowed:
+                pred_grid = prediction.grid if prediction and prediction.grid is not None else None
                 spec = ActionSpec(
                     name=queued.name, data=queued.data, source="verified_plan_queue",
-                    predicted_effect=prediction.expected_effect, score=queued.score,
-                    program_id=prediction.program_id,
-                    predicted_state_key=_stable_hash_bytes(
-                        prediction.grid.tobytes()),
+                    predicted_effect=prediction.expected_effect if prediction else None, score=queued.score,
+                    program_id=prediction.program_id if prediction else None,
+                    predicted_state_key=_stable_hash_bytes(pred_grid.tobytes()) if pred_grid is not None else None,
                     goal_ids=decision.goal_ids,
                 )
                 return spec, False, {"stage": "verified_plan_queue", "alignment": round(decision.score, 3)}
@@ -7308,6 +7422,25 @@ class MetacognitiveController:
                         applied_cf_bias = True
                 if applied_cf_bias:
                     self.memory.post_breakthrough_continuation_bias = 2.0
+                
+                # Productive search convergence pressure on Level 0
+                if self.memory.current_level_index == 0 and not self.memory.post_breakthrough_window_active:
+                    if self.steps_since_progress >= 20 and len(self.memory.transitions) >= 15:
+                        self.memory.productive_search_convergence_pressure = min(2.5, (self.steps_since_progress - 15) * 0.1)
+                
+                # Assign completion and terminal condition telemetry
+                if cf_plan.prediction and cf_plan.prediction.grid is not None:
+                    c_b, t_b, cl_u, py_u = _evaluate_state_completion_and_terminal(
+                        cf_plan.prediction.grid, scene.grid, scene, self.memory.top_mechanism_family, cf_plan.first_action
+                    )
+                    self.memory.counterfactual_completion_bias = c_b
+                    self.memory.terminal_condition_bonus = t_b
+                    self.memory.mechanism_completion_bonus = c_b
+                    if cl_u:
+                        self.memory.line_beam_closure_bias_used = True
+                    if py_u:
+                        self.memory.component_delete_payoff_bias_used = True
+
                 stage_name = "counterfactual_program_search" if profile.use_programs and not self.dead.is_dead("counterfactual_program_search") and self.counterfactual_streak < 15 else "counterfactual_fallback"
                 return cf_plan.first_action, False, {
                     "stage": stage_name,
@@ -7319,6 +7452,8 @@ class MetacognitiveController:
                     "goals": list(cf_plan.alignment.goal_ids),
                     "plan_length": 1 + len(cf_plan.remaining),
                     "post_breakthrough_bias_used": applied_cf_bias,
+                    "counterfactual_completion_bias": self.memory.counterfactual_completion_bias,
+                    "terminal_condition_bonus": self.memory.terminal_condition_bonus,
                 }
         else:
             self.counterfactual_streak = 0
@@ -8322,6 +8457,12 @@ class MyAgent(Agent):
             mechanism_family_promoted=str(self.memory.mechanism_family_promoted),
             component_delete_component_locked=bool(self.memory.component_delete_component_locked),
             line_beam_structured_candidates_used=bool(self.memory.line_beam_structured_candidates_used),
+            counterfactual_completion_bias=float(self.memory.counterfactual_completion_bias),
+            terminal_condition_bonus=float(self.memory.terminal_condition_bonus),
+            mechanism_completion_bonus=float(self.memory.mechanism_completion_bonus),
+            productive_search_convergence_pressure=float(self.memory.productive_search_convergence_pressure),
+            line_beam_closure_bias_used=bool(self.memory.line_beam_closure_bias_used),
+            component_delete_payoff_bias_used=bool(self.memory.component_delete_payoff_bias_used),
             regrounded_winning_coords=self.memory.regrounded_winning_coords,
             regrounding_delta=self.memory.regrounding_delta,
             regrounding_confidence=float(self.memory.regrounding_confidence),
