@@ -5492,6 +5492,34 @@ class OptionalLocalReasoner:
             return None
         return None
 
+    def propose_relocalization(self, scene: Scene, win_pattern: dict[str, Any], step: int = 0) -> dict[str, Any] | None:
+        if not self._load():
+            return None
+        win_action = win_pattern.get("action", "ACTION6")
+        win_coords = win_pattern.get("coords", (scene.width // 2, scene.height // 2))
+        win_family = win_pattern.get("family", "targeted_recolor")
+        
+        prompt = (
+            f"You are an ARC-AGI-3 level transfer assistant.\n"
+            f"Previous level was SOLVED by action '{win_action}' at target coordinates {win_coords} under mechanism family '{win_family}'.\n"
+            f"Current Level grid size: {scene.width}x{scene.height}, components: {len(scene.components)}.\n"
+            f"Relocalize where the corresponding target component is located in this new level grid.\n"
+            f"Respond ONLY with a single JSON object:\n"
+            f'{{"type": "relocalize", "x": <int>, "y": <int>, "confidence": <float 0.0-1.0>, "why": "<reasoning>"}}\n'
+        )
+        try:
+            obj = self._generate_json(prompt, step)
+            if not obj:
+                return None
+            x = int(obj.get("x", -1))
+            y = int(obj.get("y", -1))
+            conf = float(obj.get("confidence", 0.5))
+            if 0 <= x < scene.width and 0 <= y < scene.height:
+                return {"x": x, "y": y, "confidence": conf, "why": obj.get("why", "")}
+        except Exception:
+            pass
+        return None
+
 # ---------------------------------------------------------------------------
 # Candidate generation, virtual-first arbitration, and metacognition
 # ---------------------------------------------------------------------------
