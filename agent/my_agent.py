@@ -671,6 +671,19 @@ class DiagnosticTraceRecord:
     near_terminal_finish_trigger_reason: str = ""
     near_terminal_finish_exit_reason: str = ""
     productive_branch_commitment_used: bool = False
+    near_terminal_finish_gate_family_consensus: bool = False
+    near_terminal_finish_gate_branch_consensus: bool = False
+    near_terminal_finish_gate_completion_stability: bool = False
+    near_terminal_finish_gate_allowed: bool = False
+    finish_branch_continuation_family: str = ""
+    finish_branch_continuation_steps: int = 0
+    finish_branch_continuation_kept_control: bool = False
+    finish_branch_continuation_break_reason: str = ""
+    finish_family_collision_suppressed: bool = False
+    finish_family_collision_suppressed_family: str = ""
+    finish_family_collision_suppressed_until_step: int = 0
+    finish_mode_preempted_counterfactual: bool = False
+    finish_mode_preempt_block_reason: str = ""
     regrounded_winning_coords: Any = None
     regrounding_delta: Any = None
     regrounding_confidence: float = 0.0
@@ -2049,6 +2062,23 @@ class TraceMemory:
         self.productive_branch_commitment_used: bool = False
         self.consecutive_completion_signals: int = 0
         self.finish_mode_noop_streak: int = 0
+        self.near_terminal_finish_gate_family_consensus: bool = False
+        self.near_terminal_finish_gate_branch_consensus: bool = False
+        self.near_terminal_finish_gate_completion_stability: bool = False
+        self.near_terminal_finish_gate_allowed: bool = False
+        self.finish_branch_continuation_family: str = ""
+        self.finish_branch_continuation_steps: int = 0
+        self.finish_branch_continuation_kept_control: bool = False
+        self.finish_branch_continuation_break_reason: str = ""
+        self.finish_family_collision_suppressed: bool = False
+        self.finish_family_collision_suppressed_family: str = ""
+        self.finish_family_collision_suppressed_until_step: int = 0
+        self.finish_mode_preempted_counterfactual: bool = False
+        self.finish_mode_preempt_block_reason: str = ""
+        self.finish_family_collision_counts: dict[str, int] = {}
+        self.recent_completion_scores: list[float] = []
+        self.recent_mechanism_families: list[str] = []
+        self.recent_action_sources: list[str] = []
         self.family_stagnation_steps: dict[str, int] = {}
         self.regrounded_winning_coords: tuple[int, int] | None = None
         self.regrounding_delta: tuple[int, int] | None = None
@@ -7066,7 +7096,7 @@ class MetacognitiveController:
         if prediction is not None:
             score += 0.8 * prediction.confidence - 0.6 * prediction.uncertainty
 
-        # Productive-Branch Commitment bonus during near-terminal finish mode
+        # Productive-Branch Commitment & Dominance during near-terminal finish mode
         if (
             self.memory.current_level_index == 0
             and not self.memory.post_breakthrough_window_active
@@ -7075,11 +7105,14 @@ class MetacognitiveController:
             top_kinds = MECHANISM_TO_PROGRAM_KINDS.get(self.memory.near_terminal_finish_family, set())
             p_kind = getattr(prediction, "kind", "") if prediction else ""
             if p_kind and (p_kind == self.memory.near_terminal_finish_family or p_kind in top_kinds):
-                score += 2.8
+                score += 3.5
                 self.memory.productive_branch_commitment_used = True
+                self.memory.finish_branch_continuation_family = self.memory.near_terminal_finish_family
+                self.memory.finish_branch_continuation_kept_control = True
             elif candidate.spec.source == self.memory.near_terminal_finish_source:
-                score += 2.2
+                score += 3.0
                 self.memory.productive_branch_commitment_used = True
+                self.memory.finish_branch_continuation_kept_control = True
 
         return score, decision, prediction
 
@@ -7117,6 +7150,14 @@ class MetacognitiveController:
         self.memory.orthogonal_collision_steer_used = False
         self.memory.cell_cycle_persistence_used = False
         self.memory.productive_branch_commitment_used = False
+        self.memory.near_terminal_finish_gate_family_consensus = False
+        self.memory.near_terminal_finish_gate_branch_consensus = False
+        self.memory.near_terminal_finish_gate_completion_stability = False
+        self.memory.near_terminal_finish_gate_allowed = False
+        self.memory.finish_branch_continuation_kept_control = False
+        self.memory.finish_branch_continuation_break_reason = ""
+        self.memory.finish_mode_preempted_counterfactual = False
+        self.memory.finish_mode_preempt_block_reason = "" 
         self.llm_step_meta = {
             "reasoner_consulted_this_step": False,
             "reasoner_parsed_abduction_this_step": False,
@@ -8301,10 +8342,25 @@ class MyAgent(Agent):
             elif event.game_over:
                 self.memory.post_breakthrough_failed_attempts += 1
         
-        # 0. Bounded Near-Terminal Finish Mode State Machine on Level 0
+        # 0. Bounded Near-Terminal Finish Mode & Productive Branch Dominance on Level 0
         if self.memory.current_level_index == 0 and not self.memory.post_breakthrough_window_active:
+            # Update rolling recent history
+            if event.changed_count > 0 and not event.no_op:
+                c_score = float(self.memory.counterfactual_completion_bias + self.memory.terminal_condition_bonus)
+                self.memory.recent_completion_scores.append(c_score)
+                if len(self.memory.recent_completion_scores) > 6:
+                    self.memory.recent_completion_scores.pop(0)
+                self.memory.recent_mechanism_families.append(self.memory.top_mechanism_family)
+                if len(self.memory.recent_mechanism_families) > 6:
+                    self.memory.recent_mechanism_families.pop(0)
+                p_stage_curr = str(self.pending_reasoning.get("stage", ""))
+                self.memory.recent_action_sources.append(p_stage_curr)
+                if len(self.memory.recent_action_sources) > 6:
+                    self.memory.recent_action_sources.pop(0)
+
             # Check Active Finish Mode Updates / Exits
             if self.memory.near_terminal_finish_mode_active:
+                self.memory.finish_branch_continuation_steps += 1
                 if event.no_op:
                     self.memory.finish_mode_noop_streak += 1
                 else:
@@ -8313,41 +8369,89 @@ class MyAgent(Agent):
                 if event.level_delta > 0 or self.memory.current_level_index > 0:
                     self.memory.near_terminal_finish_mode_active = False
                     self.memory.near_terminal_finish_exit_reason = "level_cleared"
+                    self.memory.finish_branch_continuation_break_reason = "level_cleared"
                 elif getattr(event, "death", False) or event.game_over:
                     self.memory.near_terminal_finish_mode_active = False
                     self.memory.near_terminal_finish_exit_reason = "fatal_collision"
+                    self.memory.finish_branch_continuation_break_reason = "fatal_collision"
+                    # Collision-aware finish-family suppression
+                    fam = self.memory.near_terminal_finish_family
+                    if fam:
+                        self.memory.finish_family_collision_counts[fam] = self.memory.finish_family_collision_counts.get(fam, 0) + 1
+                        if self.memory.finish_family_collision_counts[fam] >= 2:
+                            self.memory.finish_family_collision_suppressed = True
+                            self.memory.finish_family_collision_suppressed_family = fam
+                            self.memory.finish_family_collision_suppressed_until_step = self.step_index + 30
                 elif self.memory.finish_mode_noop_streak >= 2:
                     self.memory.near_terminal_finish_mode_active = False
                     self.memory.near_terminal_finish_exit_reason = "noop_streak_exhaustion"
+                    self.memory.finish_branch_continuation_break_reason = "noop_streak_exhaustion"
                 elif self.memory.top_mechanism_confidence >= 0.65 and self.memory.top_mechanism_family != self.memory.near_terminal_finish_family:
                     self.memory.near_terminal_finish_mode_active = False
                     self.memory.near_terminal_finish_exit_reason = "mechanism_family_shift"
+                    self.memory.finish_branch_continuation_break_reason = "mechanism_family_shift"
                 else:
                     self.memory.near_terminal_finish_steps_remaining -= 1
                     if self.memory.near_terminal_finish_steps_remaining <= 0:
                         self.memory.near_terminal_finish_mode_active = False
                         self.memory.near_terminal_finish_exit_reason = "finish_window_expired"
+                        self.memory.finish_branch_continuation_break_reason = "finish_window_expired"
 
-            # Check Finish Mode Entry Criteria
+            # Check Finish Mode Entry Criteria with Selective Gating & Collision Suppression
             if not self.memory.near_terminal_finish_mode_active and not event.game_over and not event.no_op:
-                p_stage = self.pending_reasoning.get("stage", "")
-                is_structured_search = p_stage in ("counterfactual_program_search", "counterfactual_program", "verified_plan_queue", "macro_replay")
-                has_finish_signal = (
-                    self.memory.counterfactual_completion_bias >= 1.5
-                    or self.memory.terminal_condition_bonus >= 2.0
-                    or self.memory.line_beam_closure_bias_used
-                    or self.memory.component_delete_payoff_bias_used
+                p_stage = str(self.pending_reasoning.get("stage", ""))
+                is_structured = p_stage in ("counterfactual_program_search", "counterfactual_program", "verified_plan_queue", "macro_replay")
+                
+                # Check collision suppression
+                is_suppressed = (
+                    self.memory.finish_family_collision_suppressed
+                    and self.memory.top_mechanism_family == self.memory.finish_family_collision_suppressed_family
+                    and self.step_index < self.memory.finish_family_collision_suppressed_until_step
                 )
-                if is_structured_search and has_finish_signal:
+
+                # Gate 1: Family Consensus (repeated productive signals from the same mechanism family)
+                fam_count = sum(1 for f in self.memory.recent_mechanism_families[-4:] if f == self.memory.top_mechanism_family)
+                gate_family = (fam_count >= 3 and len(self.memory.recent_mechanism_families) >= 3 and self.memory.top_mechanism_confidence >= 0.32)
+
+                # Gate 2: Branch Consensus (consecutive non-noop state changes with non-decreasing completion)
+                recent_scores = self.memory.recent_completion_scores[-3:]
+                gate_branch = (len(recent_scores) >= 2 and all(recent_scores[i] <= recent_scores[i+1] + 0.1 for i in range(len(recent_scores)-1)) and sum(recent_scores) > 1.5)
+
+                # Gate 3: Completion Stability (both completion bias and terminal bonus high)
+                gate_stability = (self.memory.counterfactual_completion_bias >= 2.0 and self.memory.terminal_condition_bonus >= 2.5)
+
+                self.memory.near_terminal_finish_gate_family_consensus = gate_family
+                self.memory.near_terminal_finish_gate_branch_consensus = gate_branch
+                self.memory.near_terminal_finish_gate_completion_stability = gate_stability
+
+                # Check if counterfactual search is exceptionally healthy and should not be prematurely preempted
+                is_cf_healthy = (
+                    p_stage == "counterfactual_program_search"
+                    and self.controller.counterfactual_streak < 3
+                    and self.memory.counterfactual_completion_bias >= 2.0
+                    and not gate_stability
+                    and not gate_family
+                )
+
+                if is_cf_healthy:
+                    self.memory.finish_mode_preempted_counterfactual = True
+                    self.memory.finish_mode_preempt_block_reason = "healthy_counterfactual_preserved"
+
+                if is_structured and not is_suppressed and not is_cf_healthy and (gate_family or gate_branch or gate_stability):
                     self.memory.consecutive_completion_signals += 1
                     if self.memory.consecutive_completion_signals >= 2:
+                        self.memory.near_terminal_finish_gate_allowed = True
                         self.memory.near_terminal_finish_mode_active = True
                         self.memory.near_terminal_finish_steps_remaining = 6
                         self.memory.near_terminal_finish_family = self.memory.top_mechanism_family
                         self.memory.near_terminal_finish_source = p_stage
-                        self.memory.near_terminal_finish_trigger_reason = f"consecutive_completion_signals_{self.memory.consecutive_completion_signals}"
+                        self.memory.near_terminal_finish_trigger_reason = (
+                            "family_consensus" if gate_family else ("branch_consensus" if gate_branch else "completion_stability")
+                        )
                         self.memory.near_terminal_finish_exit_reason = ""
                         self.memory.finish_mode_noop_streak = 0
+                        self.memory.finish_branch_continuation_steps = 0
+                        self.memory.finish_branch_continuation_family = self.memory.top_mechanism_family
                 else:
                     self.memory.consecutive_completion_signals = max(0, self.memory.consecutive_completion_signals - 1)
 
@@ -8686,6 +8790,19 @@ class MyAgent(Agent):
             near_terminal_finish_trigger_reason=str(self.memory.near_terminal_finish_trigger_reason),
             near_terminal_finish_exit_reason=str(self.memory.near_terminal_finish_exit_reason),
             productive_branch_commitment_used=bool(self.memory.productive_branch_commitment_used),
+            near_terminal_finish_gate_family_consensus=bool(self.memory.near_terminal_finish_gate_family_consensus),
+            near_terminal_finish_gate_branch_consensus=bool(self.memory.near_terminal_finish_gate_branch_consensus),
+            near_terminal_finish_gate_completion_stability=bool(self.memory.near_terminal_finish_gate_completion_stability),
+            near_terminal_finish_gate_allowed=bool(self.memory.near_terminal_finish_gate_allowed),
+            finish_branch_continuation_family=str(self.memory.finish_branch_continuation_family),
+            finish_branch_continuation_steps=int(self.memory.finish_branch_continuation_steps),
+            finish_branch_continuation_kept_control=bool(self.memory.finish_branch_continuation_kept_control),
+            finish_branch_continuation_break_reason=str(self.memory.finish_branch_continuation_break_reason),
+            finish_family_collision_suppressed=bool(self.memory.finish_family_collision_suppressed),
+            finish_family_collision_suppressed_family=str(self.memory.finish_family_collision_suppressed_family),
+            finish_family_collision_suppressed_until_step=int(self.memory.finish_family_collision_suppressed_until_step),
+            finish_mode_preempted_counterfactual=bool(self.memory.finish_mode_preempted_counterfactual),
+            finish_mode_preempt_block_reason=str(self.memory.finish_mode_preempt_block_reason),
             regrounded_winning_coords=self.memory.regrounded_winning_coords,
             regrounding_delta=self.memory.regrounding_delta,
             regrounding_confidence=float(self.memory.regrounding_confidence),
