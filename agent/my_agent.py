@@ -6928,6 +6928,11 @@ class MetacognitiveController:
                     sig = _action_signature(sub_scene, s_cand.spec)
                     if self.dead.is_dead(sig):
                         continue
+                    if s_cand.spec.data:
+                        c_dict = dict(s_cand.spec.data)
+                        if "x" in c_dict and "y" in c_dict:
+                            if self.memory.spatial_visits.get((c_dict["x"], c_dict["y"]), 0) >= 3:
+                                continue
 
                     pred = self._predict(sub_scene, s_cand.spec, profile)
                     dec = self._verify(sub_scene, s_cand.spec, legal_names, pred, False, profile)
@@ -7230,6 +7235,11 @@ class MetacognitiveController:
             if self.dead.is_dead(signature):
                 self.plan_queue.clear()
                 continue
+            data = queued.data_dict
+            if "x" in data and "y" in data:
+                if self.memory.spatial_visits.get((data["x"], data["y"]), 0) >= 3:
+                    self.plan_queue.clear()
+                    continue
             prediction = self._predict(scene, queued, profile)
             decision = self._verify(
                 scene, queued, legal_names, prediction, prediction is None, profile)
