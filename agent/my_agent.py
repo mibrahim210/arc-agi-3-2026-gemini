@@ -6272,11 +6272,13 @@ class CounterfactualPlanner:
         programs: ExecutableProgramLibrary,
         goals: GoalHypothesisManager,
         alignment: GoalAlignmentVerifier,
+        memory: Any = None,
     ) -> None:
         self.config = config
         self.programs = programs
         self.goals = goals
         self.alignment = alignment
+        self.memory = memory
 
     def plan(
         self,
@@ -6291,6 +6293,14 @@ class CounterfactualPlanner:
         for candidate in sorted(candidates, key=lambda c: c.score, reverse=True):
             if candidate.spec.key in seen:
                 continue
+            # Prune fatigued interior coordinates (>= 4 visits on Level 0) from counterfactual planning
+            if self.memory and self.memory.current_level_index == 0 and not self.memory.post_breakthrough_window_active and candidate.spec.data:
+                c_dict = dict(candidate.spec.data)
+                if "x" in c_dict and "y" in c_dict:
+                    # Do not prune UI palette selector row (y <= 2)
+                    if c_dict["y"] > 2 and c_dict["x"] > 2:
+                        if self.memory.spatial_visits_by_action.get((candidate.spec.name, c_dict["x"], c_dict["y"]), 0) >= 4:
+                            continue
             seen.add(candidate.spec.key)
             base_actions.append(candidate.spec)
             if len(base_actions) >= self.config.counterfactual_candidate_limit:
@@ -8197,7 +8207,7 @@ class MyAgent(Agent):
         )
         self.alignment = GoalAlignmentVerifier(self.config, self.goals)
         self.counterfactual = CounterfactualPlanner(
-            self.config, self.programs, self.goals, self.alignment
+            self.config, self.programs, self.goals, self.alignment, self.memory
         )
         self.controller = MetacognitiveController(
             self.config,
@@ -8638,7 +8648,9 @@ class MyAgent(Agent):
         if self.pending_reasoning.get("final_action_source") in ("milestone_model_verified", "milestone_model_goal_verified", "llm_program", "llm_follow_through", "counterfactual_program"):
             if not event.no_op and not event.game_over:
                 fam = self.pending_reasoning.get("llm_family") or self.memory.llm_recent_committed_family or "translation"
-                if fam in ("translation", "component_recolor") and len(self.memory.macro_replay_queue) == 0:
+                p_dict = dict(self.pending_action.data) if self.pending_action and self.pending_action.data else {}
+                is_palette_button = "y" in p_dict and p_dict["y"] <= 2
+                if not is_palette_button and fam in ("translation", "component_recolor") and len(self.memory.macro_replay_queue) == 0:
                     for _ in range(2):
                         self.memory.macro_replay_queue.append(self.pending_action)
                     self.memory.macro_replay_family = fam
