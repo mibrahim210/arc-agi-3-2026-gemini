@@ -6378,12 +6378,26 @@ class MetacognitiveController:
             
             p_kind = getattr(pred, "kind", "") if pred else ""
             seed_score = cand.score + decision.score
+            applied_transfer_bias = False
             if p_kind:
                 if p_kind == top_fam or p_kind in top_kinds:
                     seed_score += 1.0
                 elif any(p_kind == pf or p_kind in MECHANISM_TO_PROGRAM_KINDS.get(pf, set()) for pf in prio_fams):
                     seed_score += 0.8
-            scored_seeds.append((seed_score, cand))
+            if self.memory.post_breakthrough_window_active:
+                if p_kind and (p_kind == self.memory.transferred_winning_program_kind or p_kind == self.memory.transferred_winning_family):
+                    seed_score += 1.5
+                    applied_transfer_bias = True
+                if cand.spec.name == self.memory.transferred_winning_action_name:
+                    seed_score += 1.0
+                    applied_transfer_bias = True
+                if self.memory.transferred_winning_coords and cand.spec.data:
+                    c_dict = dict(cand.spec.data)
+                    if "x" in c_dict and "y" in c_dict:
+                        if abs(c_dict["x"] - self.memory.transferred_winning_coords[0]) + abs(c_dict["y"] - self.memory.transferred_winning_coords[1]) <= 2:
+                            seed_score += 0.8
+                            applied_transfer_bias = True
+            scored_seeds.append((seed_score, cand, applied_transfer_bias))
 
         if not scored_seeds:
             meta["deep_search_aborted_reason"] = "no_valid_seed_candidates"
@@ -6392,26 +6406,27 @@ class MetacognitiveController:
         scored_seeds.sort(key=lambda x: -x[0])
         initial_frontier = scored_seeds[:max_width]
 
-        # Beam structure: (total_score, action_path, current_grid, current_scene, last_pred_kind)
-        beams: list[tuple[float, list[ActionSpec], np.ndarray, Scene, str]] = []
-        for s_score, cand in initial_frontier:
+        # Beam structure: (total_score, action_path, current_grid, current_scene, last_pred_kind, applied_transfer_bias)
+        beams: list[tuple[float, list[ActionSpec], np.ndarray, Scene, str, bool]] = []
+        for s_score, cand, s_bias in initial_frontier:
             pred = self._predict(scene, cand.spec, profile)
             next_grid = pred.grid if (pred and pred.grid is not None) else scene.grid
             p_kind = getattr(pred, "kind", "") if pred else ""
-            beams.append((s_score, [cand.spec], next_grid, scene, p_kind))
+            beams.append((s_score, [cand.spec], next_grid, scene, p_kind, s_bias))
 
         nodes_evaluated = len(initial_frontier)
         best_path: list[ActionSpec] = []
         best_score = -999.0
         best_family = ""
+        best_bias_beneficiary = (initial_frontier[0][2] if initial_frontier else False)
 
         # Multi-step mental beam search rollouts
         for d in range(2, max_depth + 1):
             if (time.monotonic() - t_start) >= max_allowed_time or nodes_evaluated >= max_nodes:
                 break
 
-            next_beams: list[tuple[float, list[ActionSpec], np.ndarray, Scene, str]] = []
-            for b_score, path, b_grid, b_scene, b_kind in beams:
+            next_beams: list[tuple[float, list[ActionSpec], np.ndarray, Scene, str, bool]] = []
+            for b_score, path, b_grid, b_scene, b_kind, b_bias in beams:
                 sub_scene = self.perception.perceive(b_grid, b_scene.level, path[-1]) if getattr(self, "perception", None) is not None else b_scene
                 sub_candidates = self.candidate_generator.generate(sub_scene, legal_actions, use_hypotheses=profile.use_hypotheses)
                 
@@ -6432,6 +6447,7 @@ class MetacognitiveController:
                     # Evaluate multi-step trajectory
                     step_reward = s_cand.score + dec.score
                     p_kind = getattr(pred, "kind", "") if pred else b_kind
+                    applied_traj_bias = b_bias
                     
                     if pred is not None:
                         if pred.expected_effect is not None:
@@ -6440,18 +6456,24 @@ class MetacognitiveController:
                             step_reward += 0.6
                         if getattr(pred, "predicted_level_delta", 0) > 0:
                             step_reward += 5.0
+                    
+                    if self.memory.post_breakthrough_window_active:
+                        if p_kind and (p_kind == self.memory.transferred_winning_program_kind or p_kind == self.memory.transferred_winning_family):
+                            step_reward += 1.0
+                            applied_traj_bias = True
 
                     # Action economy discount (prefer shorter paths to progress)
                     step_reward -= 0.05 * d
                     new_score = b_score + step_reward
                     next_grid = pred.grid if (pred and pred.grid is not None) else b_grid
                     new_path = path + [s_cand.spec]
-                    next_beams.append((new_score, new_path, next_grid, sub_scene, p_kind))
+                    next_beams.append((new_score, new_path, next_grid, sub_scene, p_kind, applied_traj_bias))
 
                     if new_score > best_score and len(new_path) >= 2:
                         best_score = new_score
                         best_path = new_path
                         best_family = p_kind
+                        best_bias_beneficiary = applied_traj_bias
 
             if not next_beams:
                 break
@@ -6465,9 +6487,12 @@ class MetacognitiveController:
             "deep_search_best_score": round(best_score, 3) if best_path else -999.0,
             "deep_search_time_ms": round(t_elapsed_ms, 2),
             "deep_search_selected_family": best_family,
+            "post_breakthrough_bias_used": bool(best_path and best_score > 1.0 and best_bias_beneficiary and self.memory.post_breakthrough_window_active),
         })
 
         if best_path and best_score > 1.0:
+            if best_bias_beneficiary and self.memory.post_breakthrough_window_active:
+                self.memory.post_breakthrough_bias_used = True
             first_action = best_path[0]
             remaining = best_path[1:]
             return first_action, remaining, meta
@@ -6770,8 +6795,16 @@ class MetacognitiveController:
                     ft_score += 0.8
                 if prediction is not None and prediction.program_id in ft_programs:
                     ft_score += 1.0
+                applied_ft_transfer_bias = False
                 if prediction is not None:
                     ft_score += self._priority_family_boost(prediction.kind)
+                if self.memory.post_breakthrough_window_active:
+                    if prediction and (prediction.kind == self.memory.transferred_winning_program_kind or prediction.kind == self.memory.transferred_winning_family):
+                        ft_score += 1.2
+                        applied_ft_transfer_bias = True
+                    if candidate.spec.name == self.memory.transferred_winning_action_name:
+                        ft_score += 0.8
+                        applied_ft_transfer_bias = True
                 if ft_coords and candidate.spec.data:
                     cx, cy = candidate.spec.data_dict.get("x"), candidate.spec.data_dict.get("y")
                     if cx is not None and cy is not None:
@@ -6780,10 +6813,12 @@ class MetacognitiveController:
                             ft_score += 0.6
                         elif cx == ft_coords[0] or cy == ft_coords[1]:
                             ft_score += 0.3
-                ft_candidates.append((ft_score, candidate, decision, prediction))
+                ft_candidates.append((ft_score, candidate, decision, prediction, applied_ft_transfer_bias))
             if ft_candidates:
                 ft_candidates.sort(key=lambda row: row[0], reverse=True)
-                score, best, decision, prediction = ft_candidates[0]
+                score, best, decision, prediction, applied_ft_transfer_bias = ft_candidates[0]
+                if applied_ft_transfer_bias:
+                    self.memory.post_breakthrough_bias_used = True
                 spec = ActionSpec(
                     name=best.spec.name, data=best.spec.data, source="llm_follow_through",
                     predicted_effect=best.spec.predicted_effect if prediction is None else prediction.expected_effect,
@@ -6797,6 +6832,7 @@ class MetacognitiveController:
                     "follow_through_family": ft_family,
                     "follow_through_window": self.memory.llm_follow_through_window,
                     "score": round(score, 3),
+                    "post_breakthrough_bias_used": applied_ft_transfer_bias,
                     **self.llm_step_meta
                 }
 
@@ -6973,19 +7009,29 @@ class MetacognitiveController:
 
         # 5) Replay/hash/hypothesis arbitration remains the A5 safety core.
         ranked: list[tuple[float, Candidate,
-                           AlignmentDecision, ProgramPrediction | None]] = []
+                           AlignmentDecision, ProgramPrediction | None, bool]] = []
         for candidate in candidates:
             score, decision, prediction = self._aligned_known_candidate(
                 scene, candidate, legal_names, profile)
             if decision.allowed and not candidate.is_probe:
+                applied_bias = False
                 if prediction is not None:
                     score += self._priority_family_boost(prediction.kind)
                     if prediction.kind == self.memory.top_mechanism_family:
                         score += 0.8
-                ranked.append((score, candidate, decision, prediction))
+                    if self.memory.post_breakthrough_window_active:
+                        if prediction.kind == self.memory.transferred_winning_program_kind or prediction.kind == self.memory.transferred_winning_family:
+                            score += 1.5
+                            applied_bias = True
+                        if candidate.spec.name == self.memory.transferred_winning_action_name:
+                            score += 1.0
+                            applied_bias = True
+                ranked.append((score, candidate, decision, prediction, applied_bias))
         if ranked:
             ranked.sort(key=lambda row: row[0], reverse=True)
-            score, best, decision, prediction = ranked[0]
+            score, best, decision, prediction, applied_bias = ranked[0]
+            if applied_bias:
+                self.memory.post_breakthrough_bias_used = True
             spec = ActionSpec(
                 name=best.spec.name, data=best.spec.data, source=best.spec.source,
                 predicted_effect=best.spec.predicted_effect if prediction is None else prediction.expected_effect,
@@ -7002,6 +7048,7 @@ class MetacognitiveController:
                 "alignment": round(decision.score, 3),
                 "goal_delta": round(decision.goal_delta, 3),
                 "rationale": best.rationale[:4],
+                "post_breakthrough_bias_used": applied_bias,
             }
 
         # 5b) Promising-State Bounded Deep Search (Multi-Step Mental Rollout)
@@ -7345,10 +7392,20 @@ class MetacognitiveController:
                 score = candidate.score + 0.65 * eig + decision.score - 0.45 + probe_boost
                 if self.memory.recent_state_loop(self.config.loop_window) or self.memory.no_op_streak >= self.config.no_progress_cooldown_steps:
                     score += 0.65
-                probes.append((score, candidate, decision, probe_matched))
+                applied_probe_transfer_bias = False
+                if self.memory.post_breakthrough_window_active:
+                    if self.memory.transferred_winning_coords and candidate.spec.data:
+                        c_dict = dict(candidate.spec.data)
+                        if "x" in c_dict and "y" in c_dict:
+                            if abs(c_dict["x"] - self.memory.transferred_winning_coords[0]) + abs(c_dict["y"] - self.memory.transferred_winning_coords[1]) <= 2:
+                                score += 1.0
+                                applied_probe_transfer_bias = True
+                probes.append((score, candidate, decision, probe_matched, applied_probe_transfer_bias))
         if probes:
             probes.sort(key=lambda row: row[0], reverse=True)
-            score, best, decision, probe_matched = probes[0]
+            score, best, decision, probe_matched, applied_probe_transfer_bias = probes[0]
+            if applied_probe_transfer_bias:
+                self.memory.post_breakthrough_bias_used = True
             self.memory.recommended_probe_type = ""
             self.memory.recommended_probe_ttl = 0
             spec = ActionSpec(
@@ -7365,6 +7422,7 @@ class MetacognitiveController:
                 "rationale": best.rationale[:4],
                 "is_discriminating_probe": probe_matched,
                 "probe_recommendation_present": bool(self.memory.recommended_probe_type),
+                "post_breakthrough_bias_used": applied_probe_transfer_bias,
             }
 
         # 8) Least harmful advertised action, with no invented actions.
