@@ -665,6 +665,12 @@ class DiagnosticTraceRecord:
     sequential_component_sweep_active: bool = False
     orthogonal_collision_steer_used: bool = False
     cell_cycle_persistence_used: bool = False
+    near_terminal_finish_mode_active: bool = False
+    near_terminal_finish_steps_remaining: int = 0
+    near_terminal_finish_family: str = ""
+    near_terminal_finish_trigger_reason: str = ""
+    near_terminal_finish_exit_reason: str = ""
+    productive_branch_commitment_used: bool = False
     regrounded_winning_coords: Any = None
     regrounding_delta: Any = None
     regrounding_confidence: float = 0.0
@@ -2034,6 +2040,15 @@ class TraceMemory:
         self.recommended_orthogonal_turn: str = ""
         self.last_changed_coord: tuple[int, int] | None = None
         self.coord_cycle_clicks_remaining: int = 0
+        self.near_terminal_finish_mode_active: bool = False
+        self.near_terminal_finish_steps_remaining: int = 0
+        self.near_terminal_finish_family: str = ""
+        self.near_terminal_finish_source: str = ""
+        self.near_terminal_finish_trigger_reason: str = ""
+        self.near_terminal_finish_exit_reason: str = ""
+        self.productive_branch_commitment_used: bool = False
+        self.consecutive_completion_signals: int = 0
+        self.finish_mode_noop_streak: int = 0
         self.family_stagnation_steps: dict[str, int] = {}
         self.regrounded_winning_coords: tuple[int, int] | None = None
         self.regrounding_delta: tuple[int, int] | None = None
@@ -7050,6 +7065,22 @@ class MetacognitiveController:
         score = candidate.score + decision.score
         if prediction is not None:
             score += 0.8 * prediction.confidence - 0.6 * prediction.uncertainty
+
+        # Productive-Branch Commitment bonus during near-terminal finish mode
+        if (
+            self.memory.current_level_index == 0
+            and not self.memory.post_breakthrough_window_active
+            and self.memory.near_terminal_finish_mode_active
+        ):
+            top_kinds = MECHANISM_TO_PROGRAM_KINDS.get(self.memory.near_terminal_finish_family, set())
+            p_kind = getattr(prediction, "kind", "") if prediction else ""
+            if p_kind and (p_kind == self.memory.near_terminal_finish_family or p_kind in top_kinds):
+                score += 2.8
+                self.memory.productive_branch_commitment_used = True
+            elif candidate.spec.source == self.memory.near_terminal_finish_source:
+                score += 2.2
+                self.memory.productive_branch_commitment_used = True
+
         return score, decision, prediction
 
     def choose(
@@ -7085,6 +7116,7 @@ class MetacognitiveController:
         self.memory.sequential_component_sweep_active = False
         self.memory.orthogonal_collision_steer_used = False
         self.memory.cell_cycle_persistence_used = False
+        self.memory.productive_branch_commitment_used = False
         self.llm_step_meta = {
             "reasoner_consulted_this_step": False,
             "reasoner_parsed_abduction_this_step": False,
@@ -8269,6 +8301,56 @@ class MyAgent(Agent):
             elif event.game_over:
                 self.memory.post_breakthrough_failed_attempts += 1
         
+        # 0. Bounded Near-Terminal Finish Mode State Machine on Level 0
+        if self.memory.current_level_index == 0 and not self.memory.post_breakthrough_window_active:
+            # Check Active Finish Mode Updates / Exits
+            if self.memory.near_terminal_finish_mode_active:
+                if event.no_op:
+                    self.memory.finish_mode_noop_streak += 1
+                else:
+                    self.memory.finish_mode_noop_streak = 0
+
+                if event.level_delta > 0 or self.memory.current_level_index > 0:
+                    self.memory.near_terminal_finish_mode_active = False
+                    self.memory.near_terminal_finish_exit_reason = "level_cleared"
+                elif getattr(event, "death", False) or event.game_over:
+                    self.memory.near_terminal_finish_mode_active = False
+                    self.memory.near_terminal_finish_exit_reason = "fatal_collision"
+                elif self.memory.finish_mode_noop_streak >= 2:
+                    self.memory.near_terminal_finish_mode_active = False
+                    self.memory.near_terminal_finish_exit_reason = "noop_streak_exhaustion"
+                elif self.memory.top_mechanism_confidence >= 0.65 and self.memory.top_mechanism_family != self.memory.near_terminal_finish_family:
+                    self.memory.near_terminal_finish_mode_active = False
+                    self.memory.near_terminal_finish_exit_reason = "mechanism_family_shift"
+                else:
+                    self.memory.near_terminal_finish_steps_remaining -= 1
+                    if self.memory.near_terminal_finish_steps_remaining <= 0:
+                        self.memory.near_terminal_finish_mode_active = False
+                        self.memory.near_terminal_finish_exit_reason = "finish_window_expired"
+
+            # Check Finish Mode Entry Criteria
+            if not self.memory.near_terminal_finish_mode_active and not event.game_over and not event.no_op:
+                p_stage = self.pending_reasoning.get("stage", "")
+                is_structured_search = p_stage in ("counterfactual_program_search", "counterfactual_program", "verified_plan_queue", "macro_replay")
+                has_finish_signal = (
+                    self.memory.counterfactual_completion_bias >= 1.5
+                    or self.memory.terminal_condition_bonus >= 2.0
+                    or self.memory.line_beam_closure_bias_used
+                    or self.memory.component_delete_payoff_bias_used
+                )
+                if is_structured_search and has_finish_signal:
+                    self.memory.consecutive_completion_signals += 1
+                    if self.memory.consecutive_completion_signals >= 2:
+                        self.memory.near_terminal_finish_mode_active = True
+                        self.memory.near_terminal_finish_steps_remaining = 6
+                        self.memory.near_terminal_finish_family = self.memory.top_mechanism_family
+                        self.memory.near_terminal_finish_source = p_stage
+                        self.memory.near_terminal_finish_trigger_reason = f"consecutive_completion_signals_{self.memory.consecutive_completion_signals}"
+                        self.memory.near_terminal_finish_exit_reason = ""
+                        self.memory.finish_mode_noop_streak = 0
+                else:
+                    self.memory.consecutive_completion_signals = max(0, self.memory.consecutive_completion_signals - 1)
+
         # 1. Collision-Responsive Orthogonal Steering on Level 0
         if self.memory.current_level_index == 0 and not self.memory.post_breakthrough_window_active:
             if getattr(event, "death", False) or event.game_over:
@@ -8598,6 +8680,12 @@ class MyAgent(Agent):
             sequential_component_sweep_active=bool(self.memory.sequential_component_sweep_active),
             orthogonal_collision_steer_used=bool(self.memory.orthogonal_collision_steer_used),
             cell_cycle_persistence_used=bool(self.memory.cell_cycle_persistence_used),
+            near_terminal_finish_mode_active=bool(self.memory.near_terminal_finish_mode_active),
+            near_terminal_finish_steps_remaining=int(self.memory.near_terminal_finish_steps_remaining),
+            near_terminal_finish_family=str(self.memory.near_terminal_finish_family),
+            near_terminal_finish_trigger_reason=str(self.memory.near_terminal_finish_trigger_reason),
+            near_terminal_finish_exit_reason=str(self.memory.near_terminal_finish_exit_reason),
+            productive_branch_commitment_used=bool(self.memory.productive_branch_commitment_used),
             regrounded_winning_coords=self.memory.regrounded_winning_coords,
             regrounding_delta=self.memory.regrounding_delta,
             regrounding_confidence=float(self.memory.regrounding_confidence),
