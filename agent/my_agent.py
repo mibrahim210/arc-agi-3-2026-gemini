@@ -624,6 +624,16 @@ class DiagnosticTraceRecord:
     llm_top_unproductive_family: str = ""
     llm_family_payoff_summary: dict[str, Any] = field(default_factory=dict)
     action_semantics_summary: dict[str, Any] = field(default_factory=dict)
+    promising_state_detected: bool = False
+    promising_state_reasons: list[str] = field(default_factory=list)
+    deep_search_used: bool = False
+    deep_search_depth: int = 0
+    deep_search_width: int = 0
+    deep_search_nodes_evaluated: int = 0
+    deep_search_best_score: float = 0.0
+    deep_search_time_ms: float = 0.0
+    deep_search_selected_family: str = ""
+    deep_search_aborted_reason: str = ""
 
 
 @dataclass(slots=True)
@@ -5993,6 +6003,7 @@ class MetacognitiveController:
         self.stuck_mode_activations = 0
         self.stagnation_override_count_this_level = 0
         self.llm_step_meta: dict[str, Any] = {}
+        self.perception = None
 
     def reset_level(self) -> None:
         self.plan_queue.clear()
@@ -6180,6 +6191,206 @@ class MetacognitiveController:
                 matched = True
                 
         return matched, (0.75 if matched else 0.0)
+
+    def _is_promising_state(self, scene: Scene, step: int, profile: RuntimeProfile) -> tuple[bool, list[str]]:
+        reasons: list[str] = []
+        
+        # Hard exclusions: severe stagnation with no progress, or excessive deaths
+        if self.memory.no_op_streak >= 12 and self.memory.progress_events_this_level == 0:
+            return False, []
+        if self.memory.recent_death_count(10) >= 3:
+            return False, []
+            
+        # Signal 1: First level progress already occurred
+        if self.progress_events_this_level > 0 or self.memory.level_progress_events > 0:
+            reasons.append("level_progress_occurred")
+            
+        # Signal 2: High mechanism confidence
+        if self.memory.top_mechanism_confidence >= 0.35:
+            reasons.append(f"high_mechanism_confidence_{self.memory.top_mechanism_family}")
+            
+        # Signal 3: Active follow-through or priority program families
+        if self.memory.llm_follow_through_window > 0:
+            reasons.append("active_follow_through_window")
+        if self.memory.priority_program_families:
+            reasons.append("priority_program_families_active")
+            
+        # Signal 4: Recent productive transitions
+        recent = list(self.memory.transitions)[-8:]
+        productive = [t for t in recent if t.event.changed_count > 0 and not t.event.no_op and not t.event.game_over]
+        if len(productive) >= 3:
+            reasons.append(f"frequent_productive_transitions_{len(productive)}")
+            
+        # Signal 5: Active verified program family with positive payoff
+        top_fam = self.memory.top_mechanism_family
+        if top_fam in self.memory.llm_family_payoff:
+            p_data = self.memory.llm_family_payoff[top_fam]
+            score = p_data.get("changed", 0) + 3 * p_data.get("progress", 0) - p_data.get("noop", 0)
+            if score >= 3:
+                reasons.append(f"productive_family_payoff_{top_fam}")
+                
+        is_promising = len(reasons) >= 1 and profile.use_counterfactual
+        return is_promising, reasons
+
+    def _promising_state_deep_search(
+        self,
+        scene: Scene,
+        candidates: Sequence[Candidate],
+        legal_actions: Sequence[GameAction],
+        legal_names: Sequence[str],
+        profile: RuntimeProfile,
+        remaining_sec: float | None = None,
+        promising_reasons: Sequence[str] = (),
+    ) -> tuple[ActionSpec | None, list[ActionSpec], dict[str, Any]]:
+        t_start = time.monotonic()
+        meta = {
+            "promising_state_detected": True,
+            "promising_state_reasons": list(promising_reasons),
+            "deep_search_used": False,
+            "deep_search_depth": 0,
+            "deep_search_width": 0,
+            "deep_search_nodes_evaluated": 0,
+            "deep_search_best_score": -999.0,
+            "deep_search_time_ms": 0.0,
+            "deep_search_selected_family": "",
+            "deep_search_aborted_reason": "",
+        }
+
+        # Runtime tier budget assignment
+        tier = getattr(profile, "tier", "A9")
+        if tier == "A9":
+            max_depth, max_width, max_nodes = 8, 8, 45
+            time_cap_sec = 1.5
+        elif tier == "A8":
+            max_depth, max_width, max_nodes = 5, 6, 25
+            time_cap_sec = 1.0
+        elif tier == "A7":
+            max_depth, max_width, max_nodes = 3, 4, 12
+            time_cap_sec = 0.5
+        else:
+            meta["deep_search_aborted_reason"] = "disabled_for_tier"
+            return None, [], meta
+
+        if remaining_sec is not None and remaining_sec < 45.0:
+            meta["deep_search_aborted_reason"] = "insufficient_wall_time"
+            return None, [], meta
+
+        max_allowed_time = min(time_cap_sec, (remaining_sec * 0.05) if remaining_sec else time_cap_sec)
+        meta["deep_search_depth"] = max_depth
+        meta["deep_search_width"] = max_width
+
+        # Filter and rank initial seed candidates
+        scored_seeds: list[tuple[float, Candidate]] = []
+        top_fam = self.memory.top_mechanism_family
+        prio_fams = self.memory.priority_program_families
+        top_kinds = MECHANISM_TO_PROGRAM_KINDS.get(top_fam, set())
+
+        for cand in candidates:
+            if cand.spec.name not in legal_names or self.dead.is_dead(cand.signature):
+                continue
+            pred = self._predict(scene, cand.spec, profile)
+            decision = self._verify(scene, cand.spec, legal_names, pred, cand.is_probe, profile)
+            if not decision.allowed:
+                continue
+            
+            p_kind = getattr(pred, "kind", "") if pred else ""
+            seed_score = cand.score + decision.score
+            if p_kind:
+                if p_kind == top_fam or p_kind in top_kinds:
+                    seed_score += 1.0
+                elif any(p_kind == pf or p_kind in MECHANISM_TO_PROGRAM_KINDS.get(pf, set()) for pf in prio_fams):
+                    seed_score += 0.8
+            scored_seeds.append((seed_score, cand))
+
+        if not scored_seeds:
+            meta["deep_search_aborted_reason"] = "no_valid_seed_candidates"
+            return None, [], meta
+
+        scored_seeds.sort(key=lambda x: -x[0])
+        initial_frontier = scored_seeds[:max_width]
+
+        # Beam structure: (total_score, action_path, current_grid, current_scene, last_pred_kind)
+        beams: list[tuple[float, list[ActionSpec], np.ndarray, Scene, str]] = []
+        for s_score, cand in initial_frontier:
+            pred = self._predict(scene, cand.spec, profile)
+            next_grid = pred.grid if (pred and pred.grid is not None) else scene.grid
+            p_kind = getattr(pred, "kind", "") if pred else ""
+            beams.append((s_score, [cand.spec], next_grid, scene, p_kind))
+
+        nodes_evaluated = len(initial_frontier)
+        best_path: list[ActionSpec] = []
+        best_score = -999.0
+        best_family = ""
+
+        # Multi-step mental beam search rollouts
+        for d in range(2, max_depth + 1):
+            if (time.monotonic() - t_start) >= max_allowed_time or nodes_evaluated >= max_nodes:
+                break
+
+            next_beams: list[tuple[float, list[ActionSpec], np.ndarray, Scene, str]] = []
+            for b_score, path, b_grid, b_scene, b_kind in beams:
+                sub_scene = self.perception.perceive(b_grid, b_scene.level, path[-1]) if getattr(self, "perception", None) is not None else b_scene
+                sub_candidates = self.candidate_generator.generate(sub_scene, legal_actions, use_hypotheses=profile.use_hypotheses)
+                
+                for s_cand in sub_candidates[:max_width]:
+                    nodes_evaluated += 1
+                    if (time.monotonic() - t_start) >= max_allowed_time or nodes_evaluated >= max_nodes:
+                        break
+
+                    sig = _action_signature(sub_scene, s_cand.spec)
+                    if self.dead.is_dead(sig):
+                        continue
+
+                    pred = self._predict(sub_scene, s_cand.spec, profile)
+                    dec = self._verify(sub_scene, s_cand.spec, legal_names, pred, False, profile)
+                    if not dec.allowed:
+                        continue
+
+                    # Evaluate multi-step trajectory
+                    step_reward = s_cand.score + dec.score
+                    p_kind = getattr(pred, "kind", "") if pred else b_kind
+                    
+                    if pred is not None:
+                        if pred.expected_effect is not None:
+                            step_reward += 0.8
+                        if p_kind in top_kinds or p_kind == top_fam:
+                            step_reward += 0.6
+                        if getattr(pred, "predicted_level_delta", 0) > 0:
+                            step_reward += 5.0
+
+                    # Action economy discount (prefer shorter paths to progress)
+                    step_reward -= 0.05 * d
+                    new_score = b_score + step_reward
+                    next_grid = pred.grid if (pred and pred.grid is not None) else b_grid
+                    new_path = path + [s_cand.spec]
+                    next_beams.append((new_score, new_path, next_grid, sub_scene, p_kind))
+
+                    if new_score > best_score and len(new_path) >= 2:
+                        best_score = new_score
+                        best_path = new_path
+                        best_family = p_kind
+
+            if not next_beams:
+                break
+            next_beams.sort(key=lambda x: -x[0])
+            beams = next_beams[:max_width]
+
+        t_elapsed_ms = (time.monotonic() - t_start) * 1000.0
+        meta.update({
+            "deep_search_used": bool(best_path and best_score > 1.0),
+            "deep_search_nodes_evaluated": nodes_evaluated,
+            "deep_search_best_score": round(best_score, 3) if best_path else -999.0,
+            "deep_search_time_ms": round(t_elapsed_ms, 2),
+            "deep_search_selected_family": best_family,
+        })
+
+        if best_path and best_score > 1.0:
+            first_action = best_path[0]
+            remaining = best_path[1:]
+            return first_action, remaining, meta
+
+        meta["deep_search_aborted_reason"] = "no_high_scoring_branch" if best_path else "search_exhausted"
+        return None, [], meta
 
     def _verify(
         self,
@@ -6700,6 +6911,41 @@ class MetacognitiveController:
                 "rationale": best.rationale[:4],
             }
 
+        # 5b) Promising-State Bounded Deep Search (Multi-Step Mental Rollout)
+        is_promising, promising_reasons = self._is_promising_state(scene, step, profile)
+        if is_promising:
+            ds_first, ds_remaining, ds_meta = self._promising_state_deep_search(
+                scene, candidates, legal_actions, legal_names, profile, remaining_sec=remaining_sec, promising_reasons=promising_reasons
+            )
+            self.llm_step_meta.update(ds_meta)
+            if ds_first is not None:
+                self.plan_queue.extend(ds_remaining)
+                spec = ActionSpec(
+                    name=ds_first.name, data=ds_first.data, source="promising_state_deep_search",
+                    predicted_effect=ds_first.predicted_effect, score=ds_meta.get("deep_search_best_score", 0.0),
+                    program_id=ds_first.program_id,
+                    goal_ids=ds_first.goal_ids,
+                )
+                return spec, False, {
+                    "stage": "promising_state_deep_search",
+                    "final_action_source": "promising_state_deep_search",
+                    "plan_length": 1 + len(ds_remaining),
+                    **self.llm_step_meta
+                }
+        else:
+            self.llm_step_meta.update({
+                "promising_state_detected": False,
+                "promising_state_reasons": [],
+                "deep_search_used": False,
+                "deep_search_depth": 0,
+                "deep_search_width": 0,
+                "deep_search_nodes_evaluated": 0,
+                "deep_search_best_score": -999.0,
+                "deep_search_time_ms": 0.0,
+                "deep_search_selected_family": "",
+                "deep_search_aborted_reason": "not_promising",
+            })
+
         # 6) Milestone-gated local model for A7/A8/A9 only with safe stagnation override.
         milestone, milestone_name = self._milestone(scene, step)
         is_stagnant_now = is_looping or self.memory.no_op_streak >= self.config.no_progress_consecutive_threshold
@@ -7134,6 +7380,7 @@ class MyAgent(Agent):
             self.alignment,
             self.hypotheses,
         )
+        self.controller.perception = self.perception
 
     @property
     def name(self) -> str:
@@ -7451,6 +7698,16 @@ class MyAgent(Agent):
             mechanism_shift_event=self.controller.memory.mechanism_shift_event,
             mechanism_aligned_action=bool(self.pending_reasoning.get("mechanism_aligned", False)),
             mechanism_discriminating_probe_used=bool(self.pending_reasoning.get("is_discriminating_probe", False)),
+            promising_state_detected=bool(self.pending_reasoning.get("promising_state_detected", False)),
+            promising_state_reasons=list(self.pending_reasoning.get("promising_state_reasons", [])),
+            deep_search_used=bool(self.pending_reasoning.get("deep_search_used", False)),
+            deep_search_depth=int(self.pending_reasoning.get("deep_search_depth", 0)),
+            deep_search_width=int(self.pending_reasoning.get("deep_search_width", 0)),
+            deep_search_nodes_evaluated=int(self.pending_reasoning.get("deep_search_nodes_evaluated", 0)),
+            deep_search_best_score=float(self.pending_reasoning.get("deep_search_best_score", 0.0)),
+            deep_search_time_ms=float(self.pending_reasoning.get("deep_search_time_ms", 0.0)),
+            deep_search_selected_family=str(self.pending_reasoning.get("deep_search_selected_family", "")),
+            deep_search_aborted_reason=str(self.pending_reasoning.get("deep_search_aborted_reason", "")),
             llm_top_productive_family=max(self.controller.memory.llm_family_payoff.items(), key=lambda x: x[1].get("changed", 0))[0] if self.controller.memory.llm_family_payoff else "",
             llm_top_unproductive_family=max(self.controller.memory.llm_family_payoff.items(), key=lambda x: (x[1].get("noop", 0) + x[1].get("death", 0)))[0] if self.controller.memory.llm_family_payoff else "",
             llm_family_payoff_summary={
