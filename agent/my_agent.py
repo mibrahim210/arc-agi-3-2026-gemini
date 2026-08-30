@@ -5852,6 +5852,20 @@ class CandidateGenerator:
                 proposals.append((2.4 - 0.10 * self.coordinate_visits[(cx, cy)], (cx, cy), "cell_cycle_persistence"))
                 self.memory.cell_cycle_persistence_used = True
 
+        # Drag / Push Source and Target Socket Anchors for drag_or_push & movement_control
+        is_drag_push = (self.memory.top_mechanism_family in ("drag_or_push", "movement_control") and len(self.memory.transitions) >= 3)
+        if is_drag_push and self.memory.current_level_index == 0 and not self.memory.post_breakthrough_window_active:
+            for comp in scene.components:
+                if comp.color != scene.background:
+                    cx, cy = int(round(comp.centroid[0])), int(round(comp.centroid[1]))
+                    if 0 <= cx < scene.width and 0 <= cy < scene.height:
+                        proposals.append((3.2 - 0.12 * self.coordinate_visits[(cx, cy)], (cx, cy), "drag_source_entity"))
+                    # Target destination along orthogonal projection
+                    for dx, dy in ((0, 2), (0, -2), (2, 0), (-2, 0), (2, 2), (-2, 2), (2, -2), (-2, -2)):
+                        tx, ty = cx + dx, cy + dy
+                        if 0 <= tx < scene.width and 0 <= ty < scene.height and scene.grid[ty, tx] == scene.background:
+                            proposals.append((2.7 - 0.10 * self.coordinate_visits[(tx, ty)], (tx, ty), "drag_destination_socket"))
+
         # Systematic Sequential Component Sweep for targeted_recolor (Interior non-border components)
         if (
             self.memory.current_level_index == 0
@@ -5972,6 +5986,11 @@ class CandidateGenerator:
             if action is GameAction.RESET:
                 continue
             if action.is_complex():
+                # Domain-General ARC-AGI-3 Precondition: ACTION7 (drop / place) requires an active drag in progress or paired execution
+                if action.name == "ACTION7" and not self.memory.atomic_drag_drop_paired and len(self.memory.macro_replay_queue) == 0:
+                    if self.memory.current_level_index == 0 and not self.memory.post_breakthrough_window_active:
+                        continue
+
                 for coord_score, (x, y), why in self._complex_coordinates(scene):
                     if (self.memory.mode == "exploitation_mode" or self.memory.post_breakthrough_window_active):
                         self.memory.exploitation_noop_blacklist_checks += 1
