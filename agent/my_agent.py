@@ -1966,6 +1966,10 @@ class TraceMemory:
         self.last_winning_program_kind: str = ""
         self.last_winning_family: str = ""
         self.last_winning_coords: tuple[int, int] | None = None
+        self.last_winning_component_color: int | None = None
+        self.last_winning_component_area: int = 0
+        self.last_winning_component_aspect: float = 1.0
+        self.last_winning_component_shape_hash: str = ""
         self.last_winning_source: str = ""
         self.last_winning_mechanism_family: str = ""
         self.last_winning_mechanism_confidence: float = 0.0
@@ -5728,6 +5732,10 @@ class CandidateGenerator:
                 continue
             if action.is_complex():
                 for coord_score, (x, y), why in self._complex_coordinates(scene):
+                    if (self.memory.mode == "exploitation_mode" or self.memory.post_breakthrough_window_active):
+                        if (action.name, x, y) in self.memory.exploitation_noop_blacklist or (x, y) in self.memory.exploitation_noop_neighborhood_blacklist:
+                            self.memory.exploitation_noop_blacklist_hits += 1
+                            continue
                     spec = ActionSpec(
                         name=action.name,
                         data=(("x", x), ("y", y)),
@@ -6138,33 +6146,45 @@ class MetacognitiveController:
         if not components:
             return None, None, 0.0, "no_components_in_scene"
 
+        target_color = self.memory.last_winning_component_color
+        target_area = max(1, self.memory.last_winning_component_area)
+        target_aspect = self.memory.last_winning_component_aspect
+        target_shape = self.memory.last_winning_component_shape_hash
+
         best_comp = None
         best_score = 0.0
         best_delta = (0, 0)
 
         for comp in components:
             c_x, c_y = int(round(comp.centroid[0])), int(round(comp.centroid[1]))
-            # Distance from old coords
-            dist = max(abs(c_x - w_x), abs(c_y - w_y))
-            # Shape & Aspect ratio match
+            # 1. Color match score
+            color_score = 1.0 if (target_color is not None and comp.color == target_color) else (0.4 if target_color is None else 0.0)
+            
+            # 2. Shape Key exact match
+            shape_score = 1.0 if (target_shape and comp.shape_key == target_shape) else 0.0
+            
+            # 3. Area similarity score
+            area_ratio = min(comp.area, target_area) / max(comp.area, target_area)
+            
+            # 4. Aspect ratio similarity score
             bbox_w = comp.bbox[2] - comp.bbox[0] + 1
             bbox_h = comp.bbox[3] - comp.bbox[1] + 1
             aspect = bbox_w / max(1, bbox_h)
+            aspect_sim = 1.0 - min(1.0, abs(aspect - target_aspect) / max(0.2, target_aspect))
             
-            score = 0.5
-            if dist <= 4:
-                score += 0.3
-            elif dist <= 8:
-                score += 0.15
-            if comp.area <= 12:
-                score += 0.2
+            # 5. Normalized centroid proximity
+            norm_dist = math.hypot((c_x - w_x) / max(1, scene.width), (c_y - w_y) / max(1, scene.height))
+            proximity_score = max(0.0, 1.0 - norm_dist)
+            
+            # Weighted total similarity
+            score = 0.35 * color_score + 0.20 * shape_score + 0.20 * area_ratio + 0.15 * aspect_sim + 0.10 * proximity_score
             
             if score > best_score:
                 best_score = score
                 best_comp = comp
                 best_delta = (c_x - w_x, c_y - w_y)
 
-        if best_comp is not None and best_score >= 0.60:
+        if best_comp is not None and best_score >= 0.50:
             c_x, c_y = int(round(best_comp.centroid[0])), int(round(best_comp.centroid[1]))
             regrounded = (max(0, min(scene.width - 1, c_x)), max(0, min(scene.height - 1, c_y)))
             return regrounded, best_delta, round(best_score, 2), "component_matched"
@@ -6213,7 +6233,7 @@ class MetacognitiveController:
             self.memory.recommended_probe_ttl = 0
         
         # Positive and negative evidence accumulation across recent transitions
-        detector_triggered = ""
+        triggered_detectors = set()
         recent = list(self.memory.transitions)[-10:]
         for t in recent:
             moves = getattr(t.event, "entity_moves", ())
@@ -6222,13 +6242,14 @@ class MetacognitiveController:
             if len(moves) >= 1 and t.action.name == "ACTION6":
                 self.memory.mechanism_scores["drag_or_push"] = min(1.0, self.memory.mechanism_scores["drag_or_push"] + 0.25)
                 self.memory.mechanism_scores["targeted_recolor"] = max(0.02, self.memory.mechanism_scores["targeted_recolor"] - 0.05)
-                detector_triggered = "drag_or_push"
+                triggered_detectors.add("drag_or_push")
             elif len(moves) == 1:
                 self.memory.mechanism_scores["movement_control"] = min(1.0, self.memory.mechanism_scores["movement_control"] + 0.15)
+                triggered_detectors.add("movement_control")
             elif len(moves) > 1:
                 # Direct Detector 2: gravity_or_fall
                 self.memory.mechanism_scores["gravity_or_fall"] = min(1.0, self.memory.mechanism_scores["gravity_or_fall"] + 0.25)
-                detector_triggered = "gravity_or_fall"
+                triggered_detectors.add("gravity_or_fall")
             else:
                 # Negative evidence against movement/gravity when transitions produce 0 movement
                 self.memory.mechanism_scores["movement_control"] = max(0.02, self.memory.mechanism_scores["movement_control"] - 0.04)
@@ -6237,13 +6258,15 @@ class MetacognitiveController:
             if t.event.topology_change:
                 self.memory.mechanism_scores["topology_switch"] = min(1.0, self.memory.mechanism_scores["topology_switch"] + 0.2)
                 self.memory.mechanism_scores["line_or_beam"] = min(1.0, self.memory.mechanism_scores["line_or_beam"] + 0.15)
+                triggered_detectors.add("topology_switch")
             
             # Direct Detector 3: flood_or_fill
             if t.event.changed_count >= 8 and len(moves) == 0:
                 self.memory.mechanism_scores["flood_or_fill"] = min(1.0, self.memory.mechanism_scores["flood_or_fill"] + 0.30)
-                detector_triggered = "flood_or_fill"
+                triggered_detectors.add("flood_or_fill")
             elif t.event.changed_count > 0 and len(moves) == 0:
                 self.memory.mechanism_scores["targeted_recolor"] = min(1.0, self.memory.mechanism_scores["targeted_recolor"] + 0.15)
+                triggered_detectors.add("targeted_recolor")
             elif t.event.changed_count == 0:
                 # Negative evidence against recolor/flood when no pixels changed
                 self.memory.mechanism_scores["targeted_recolor"] = max(0.02, self.memory.mechanism_scores["targeted_recolor"] - 0.03)
@@ -6252,11 +6275,11 @@ class MetacognitiveController:
             # Direct Detector 4: component_delete
             if t.event.disappeared_colors or (t.event.changed_count > 0 and len(t.event.appeared_colors) == 0 and len(moves) == 0):
                 self.memory.mechanism_scores["component_delete"] = min(1.0, self.memory.mechanism_scores["component_delete"] + 0.25)
-                detector_triggered = "component_delete"
+                triggered_detectors.add("component_delete")
             elif t.event.changed_count > 0 and not t.event.disappeared_colors:
                 self.memory.mechanism_scores["component_delete"] = max(0.02, self.memory.mechanism_scores["component_delete"] - 0.04)
 
-        self.memory.mechanism_detector_triggered = detector_triggered
+        self.memory.mechanism_detector_triggered = ",".join(sorted(triggered_detectors))
                 
         # Normalize and compute top belief
         total = sum(self.memory.mechanism_scores.values()) or 1.0
@@ -6949,6 +6972,16 @@ class MetacognitiveController:
             repeated_sig = None if repeated_effect is None else repeated_effect[0]
             recent_actions = {t.action.name for t in list(self.memory.transitions)[-6:]}
             for candidate in candidates:
+                if candidate.spec.data:
+                    c_dict = dict(candidate.spec.data)
+                    cx, cy = c_dict.get("x"), c_dict.get("y")
+                    if cx is not None and cy is not None:
+                        if (candidate.spec.name, cx, cy) in self.memory.exploitation_noop_blacklist:
+                            self.memory.exploitation_noop_blacklist_hits += 1
+                            continue
+                        if (self.memory.mode == "exploitation_mode" or self.memory.post_breakthrough_window_active) and (cx, cy) in self.memory.exploitation_noop_neighborhood_blacklist:
+                            self.memory.exploitation_noop_blacklist_hits += 1
+                            continue
                 prediction = self._predict(scene, candidate.spec, profile)
                 decision = self._verify(
                     scene, candidate.spec, legal_names, prediction, True, profile)
@@ -7831,10 +7864,33 @@ class MyAgent(Agent):
             top_conf = self.memory.top_mechanism_confidence
             action_src = self.pending_reasoning.get("final_action_source", "") or getattr(self.pending_action, "source", "")
 
+            winning_comp_color = None
+            winning_comp_area = 0
+            winning_comp_aspect = 1.0
+            winning_comp_shape_hash = ""
+            if coords and self.pending_scene:
+                wx, wy = coords
+                for c in self.pending_scene.components:
+                    x0, y0, x1, y1 = c.bbox
+                    if x0 <= wx <= x1 and y0 <= wy <= y1:
+                        winning_comp_color = c.color
+                        winning_comp_area = c.area
+                        bbox_w = x1 - x0 + 1
+                        bbox_h = y1 - y0 + 1
+                        winning_comp_aspect = bbox_w / max(1, bbox_h)
+                        winning_comp_shape_hash = c.shape_key
+                        break
+                if winning_comp_color is None and 0 <= wx < self.pending_scene.width and 0 <= wy < self.pending_scene.height:
+                    winning_comp_color = int(self.pending_scene.grid[wy, wx])
+
             self.memory.last_winning_action_name = self.pending_action.name if self.pending_action else ""
             self.memory.last_winning_program_kind = p_kind
             self.memory.last_winning_family = top_fam if top_fam else ""
             self.memory.last_winning_coords = coords
+            self.memory.last_winning_component_color = winning_comp_color
+            self.memory.last_winning_component_area = winning_comp_area
+            self.memory.last_winning_component_aspect = winning_comp_aspect
+            self.memory.last_winning_component_shape_hash = winning_comp_shape_hash
             self.memory.last_winning_source = action_src
             self.memory.last_winning_mechanism_family = top_fam
             self.memory.last_winning_mechanism_confidence = top_conf
