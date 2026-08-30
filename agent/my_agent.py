@@ -649,6 +649,12 @@ class DiagnosticTraceRecord:
     post_breakthrough_continuation_bias: float = 0.0
     post_breakthrough_local_search_used: bool = False
     post_breakthrough_abort_reason: str = ""
+    counterfactual_streak_renewed: bool = False
+    mechanism_collapse_breaker_used: bool = False
+    mechanism_family_penalized: str = ""
+    mechanism_family_promoted: str = ""
+    component_delete_component_locked: bool = False
+    line_beam_structured_candidates_used: bool = False
     regrounded_winning_coords: Any = None
     regrounding_delta: Any = None
     regrounding_confidence: float = 0.0
@@ -1997,6 +2003,13 @@ class TraceMemory:
         self.post_breakthrough_failed_attempts: int = 0
         self.post_breakthrough_continuation_bias: float = 0.0
         self.post_breakthrough_local_search_used: bool = False
+        self.counterfactual_streak_renewed: bool = False
+        self.mechanism_collapse_breaker_used: bool = False
+        self.mechanism_family_penalized: str = ""
+        self.mechanism_family_promoted: str = ""
+        self.component_delete_component_locked: bool = False
+        self.line_beam_structured_candidates_used: bool = False
+        self.family_stagnation_steps: dict[str, int] = {}
         self.regrounded_winning_coords: tuple[int, int] | None = None
         self.regrounding_delta: tuple[int, int] | None = None
         self.regrounding_confidence: float = 0.0
@@ -5705,6 +5718,47 @@ class CandidateGenerator:
                 proposals.append(
                     (1.2 + rarity - 0.12 * self.coordinate_visits[point], point, "raw_rare_color"))
 
+        # Component-Delete Coordinate Hardening: Restrict to active non-background connected components
+        is_comp_delete = (self.memory.top_mechanism_family == "component_delete" and self.memory.top_mechanism_confidence >= 0.28 and len(self.memory.transitions) >= 4)
+        if is_comp_delete:
+            self.memory.component_delete_component_locked = True
+            for comp in scene.components:
+                if comp.color != scene.background:
+                    cx, cy = int(round(comp.centroid[0])), int(round(comp.centroid[1]))
+                    proposals.append((3.2 - 0.15 * self.coordinate_visits[(cx, cy)], (cx, cy), "comp_delete_live_centroid"))
+                    x0, y0, x1, y1 = comp.bbox
+                    bx, by = (x0 + x1) // 2, (y0 + y1) // 2
+                    proposals.append((3.0 - 0.15 * self.coordinate_visits[(bx, by)], (bx, by), "comp_delete_live_bbox_center"))
+                    for cell in comp.cells[:6]:
+                        proposals.append((2.8 - 0.15 * self.coordinate_visits[cell], cell, "comp_delete_live_cell"))
+
+        # Structured Line-or-Beam Proposals: Interpolate ray/axis coordinates between matching endpoints
+        is_line_beam = (self.memory.top_mechanism_family == "line_or_beam" and self.memory.top_mechanism_confidence >= 0.28 and len(self.memory.transitions) >= 4)
+        if is_line_beam:
+            self.memory.line_beam_structured_candidates_used = True
+            for color, count in scene.color_counts:
+                if color == scene.background or count < 2 or count > 8:
+                    continue
+                ys, xs = np.where(scene.grid == color)
+                for i in range(len(xs)):
+                    p1_x, p1_y = int(xs[i]), int(ys[i])
+                    for j in range(i + 1, len(xs)):
+                        p2_x, p2_y = int(xs[j]), int(ys[j])
+                        if p1_x == p2_x:
+                            min_y, max_y = min(p1_y, p2_y), max(p1_y, p2_y)
+                            for y_mid in range(min_y, max_y + 1):
+                                p = (p1_x, y_mid)
+                                score = 2.6 - 0.12 * self.coordinate_visits[p]
+                                proposals.append((score, p, "line_beam_collinear_y"))
+                        elif p1_y == p2_y:
+                            min_x, max_x = min(p1_x, p2_x), max(p1_x, p2_x)
+                            for x_mid in range(min_x, max_x + 1):
+                                p = (x_mid, p1_y)
+                                score = 2.6 - 0.12 * self.coordinate_visits[p]
+                                proposals.append((score, p, "line_beam_collinear_x"))
+                        mid = ((p1_x + p2_x) // 2, (p1_y + p2_y) // 2)
+                        proposals.append((2.8 - 0.12 * self.coordinate_visits[mid], mid, "line_beam_midpoint"))
+
         # Pair Midpoints for rare matching color pairs (Symmetry / Alignment Anchors)
         for color, count in scene.color_counts:
             if color == scene.background or count != 2:
@@ -6533,17 +6587,23 @@ class MetacognitiveController:
                 continue
             pred = self._predict(scene, cand.spec, profile)
             decision = self._verify(scene, cand.spec, legal_names, pred, cand.is_probe or (pred is None), profile)
-            if not decision.allowed:
-                continue
-            
             p_kind = getattr(pred, "kind", "") if pred else ""
+            is_mech_aligned = (p_kind and (p_kind in top_kinds or p_kind == top_fam or any(p_kind == pf for pf in prio_fams)))
+            
+            if not decision.allowed:
+                # Relax seed admission on Level 0 when candidate is mechanism-aligned
+                if self.memory.current_level_index == 0 and decision.score >= -1.5 and is_mech_aligned:
+                    pass
+                else:
+                    continue
+            
             seed_score = cand.score + decision.score
             applied_transfer_bias = False
             if p_kind:
                 if p_kind == top_fam or p_kind in top_kinds:
-                    seed_score += 1.0
+                    seed_score += 1.5
                 elif any(p_kind == pf or p_kind in MECHANISM_TO_PROGRAM_KINDS.get(pf, set()) for pf in prio_fams):
-                    seed_score += 0.8
+                    seed_score += 1.0
             if self.memory.post_breakthrough_window_active or self.memory.current_level_index > 0:
                 if p_kind and (p_kind == self.memory.transferred_winning_program_kind or p_kind == self.memory.transferred_winning_family):
                     seed_score += 2.0
@@ -6615,11 +6675,15 @@ class MetacognitiveController:
                     
                     if pred is not None:
                         if pred.expected_effect is not None:
-                            step_reward += 0.8
+                            step_reward += 1.2
                         if p_kind in top_kinds or p_kind == top_fam:
-                            step_reward += 0.6
+                            step_reward += 1.0
                         if getattr(pred, "predicted_level_delta", 0) > 0:
-                            step_reward += 5.0
+                            step_reward += 6.0
+                        if pred.grid is not None and not np.array_equal(pred.grid, b_grid):
+                            step_reward += 1.5
+                    else:
+                        step_reward += 0.5
                     
                     if self.memory.post_breakthrough_window_active:
                         if p_kind and (p_kind == self.memory.transferred_winning_program_kind or p_kind == self.memory.transferred_winning_family):
@@ -6798,6 +6862,12 @@ class MetacognitiveController:
         self.memory.post_breakthrough_bias_used = False
         self.memory.post_breakthrough_continuation_bias = 0.0
         self.memory.post_breakthrough_local_search_used = False
+        self.memory.counterfactual_streak_renewed = False
+        self.memory.mechanism_collapse_breaker_used = False
+        self.memory.mechanism_family_penalized = ""
+        self.memory.mechanism_family_promoted = ""
+        self.memory.component_delete_component_locked = False
+        self.memory.line_beam_structured_candidates_used = False
         self.llm_step_meta = {
             "reasoner_consulted_this_step": False,
             "reasoner_parsed_abduction_this_step": False,
@@ -7933,6 +8003,11 @@ class MyAgent(Agent):
         self.memory.record(transition, self.pending_was_probe)
         self.dead.record(self.pending_signature, event)
 
+        # 1. Productive Counterfactual Streak Renewal
+        if event.changed_count > 0 and not event.no_op and not event.game_over:
+            self.controller.counterfactual_streak = 0
+            self.memory.counterfactual_streak_renewed = True
+
         # Continuation Failure Accounting
         if self.memory.post_breakthrough_window_active:
             self.memory.post_breakthrough_attempts += 1
@@ -8200,6 +8275,12 @@ class MyAgent(Agent):
             post_breakthrough_continuation_bias=float(self.memory.post_breakthrough_continuation_bias),
             post_breakthrough_local_search_used=bool(self.memory.post_breakthrough_local_search_used),
             post_breakthrough_abort_reason=str(self.memory.post_breakthrough_aborted_reason),
+            counterfactual_streak_renewed=bool(self.memory.counterfactual_streak_renewed),
+            mechanism_collapse_breaker_used=bool(self.memory.mechanism_collapse_breaker_used),
+            mechanism_family_penalized=str(self.memory.mechanism_family_penalized),
+            mechanism_family_promoted=str(self.memory.mechanism_family_promoted),
+            component_delete_component_locked=bool(self.memory.component_delete_component_locked),
+            line_beam_structured_candidates_used=bool(self.memory.line_beam_structured_candidates_used),
             regrounded_winning_coords=self.memory.regrounded_winning_coords,
             regrounding_delta=self.memory.regrounding_delta,
             regrounding_confidence=float(self.memory.regrounding_confidence),
