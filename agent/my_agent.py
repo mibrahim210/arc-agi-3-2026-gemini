@@ -684,15 +684,37 @@ class DiagnosticTraceRecord:
     finish_family_collision_suppressed_until_step: int = 0
     finish_mode_preempted_counterfactual: bool = False
     finish_mode_preempt_block_reason: str = ""
-    post_breakthrough_priority_preserved: bool = False
-    post_breakthrough_preempt_block_reason: str = ""
+    productive_branch_signature: str = ""
+    productive_branch_source: str = ""
+    productive_branch_action_name: str = ""
+    productive_branch_anchor: Any = None
+    productive_branch_family_hint: str = ""
+    productive_branch_program_kind: str = ""
+    productive_branch_streak: int = 0
+    productive_branch_last_effective_step: int = 0
+    productive_branch_family_wobble_tolerated: bool = False
+    productive_branch_family_wobble_reason: str = ""
+    structured_branch_persistence_used: bool = False
+    structured_branch_persistence_steps: int = 0
+    structured_branch_persistence_steps_remaining: int = 0
+    structured_branch_persistence_kept_control: bool = False
+    structured_branch_persistence_break_reason: str = ""
+    finish_bound_branch_signature: str = ""
     finish_bound_branch_source: str = ""
     finish_bound_branch_anchor: Any = None
     finish_bound_branch_action_name: str = ""
     finish_bound_branch_kept_control: bool = False
-    structured_branch_persistence_used: bool = False
-    structured_branch_persistence_steps: int = 0
-    structured_branch_persistence_break_reason: str = ""
+    post_breakthrough_priority_preserved: bool = False
+    post_breakthrough_preempt_block_reason: str = ""
+    post_breakthrough_local_branch_reused: bool = False
+    post_breakthrough_local_branch_break_reason: str = ""
+    productive_branch_collision_recovery_used: bool = False
+    productive_branch_collision_recovery_variant: str = ""
+    productive_branch_collision_recovery_preserved_family: bool = False
+    productive_window_extended: bool = False
+    productive_window_extension_reason: str = ""
+    productive_branch_preempt_blocked: bool = False
+    productive_branch_preempt_block_reason: str = ""
     collision_soft_retry_used: bool = False
     collision_soft_retry_variant: str = ""
     regrounded_winning_coords: Any = None
@@ -2086,15 +2108,37 @@ class TraceMemory:
         self.finish_family_collision_suppressed_until_step: int = 0
         self.finish_mode_preempted_counterfactual: bool = False
         self.finish_mode_preempt_block_reason: str = ""
-        self.post_breakthrough_priority_preserved: bool = False
-        self.post_breakthrough_preempt_block_reason: str = ""
+        self.productive_branch_signature: str = ""
+        self.productive_branch_source: str = ""
+        self.productive_branch_action_name: str = ""
+        self.productive_branch_anchor: tuple[int, int] | None = None
+        self.productive_branch_family_hint: str = ""
+        self.productive_branch_program_kind: str = ""
+        self.productive_branch_streak: int = 0
+        self.productive_branch_last_effective_step: int = 0
+        self.productive_branch_family_wobble_tolerated: bool = False
+        self.productive_branch_family_wobble_reason: str = ""
+        self.structured_branch_persistence_used: bool = False
+        self.structured_branch_persistence_steps: int = 0
+        self.structured_branch_persistence_steps_remaining: int = 0
+        self.structured_branch_persistence_kept_control: bool = False
+        self.structured_branch_persistence_break_reason: str = ""
+        self.finish_bound_branch_signature: str = ""
         self.finish_bound_branch_source: str = ""
         self.finish_bound_branch_anchor: tuple[int, int] | None = None
         self.finish_bound_branch_action_name: str = ""
         self.finish_bound_branch_kept_control: bool = False
-        self.structured_branch_persistence_used: bool = False
-        self.structured_branch_persistence_steps: int = 0
-        self.structured_branch_persistence_break_reason: str = ""
+        self.post_breakthrough_priority_preserved: bool = False
+        self.post_breakthrough_preempt_block_reason: str = ""
+        self.post_breakthrough_local_branch_reused: bool = False
+        self.post_breakthrough_local_branch_break_reason: str = ""
+        self.productive_branch_collision_recovery_used: bool = False
+        self.productive_branch_collision_recovery_variant: str = ""
+        self.productive_branch_collision_recovery_preserved_family: bool = False
+        self.productive_window_extended: bool = False
+        self.productive_window_extension_reason: str = ""
+        self.productive_branch_preempt_blocked: bool = False
+        self.productive_branch_preempt_block_reason: str = ""
         self.collision_soft_retry_used: bool = False
         self.collision_soft_retry_variant: str = ""
         self.collision_soft_retry_count: int = 0
@@ -5000,6 +5044,16 @@ class PathPlanner:
 # ---------------------------------------------------------------------------
 
 
+RELATED_MECHANISM_FAMILIES: dict[str, set[str]] = {
+    "line_or_beam": {"movement_control", "gravity_or_fall", "line_or_beam", "translation"},
+    "movement_control": {"line_or_beam", "drag_or_push", "movement_control", "translation", "gravity_or_fall"},
+    "drag_or_push": {"movement_control", "drag_or_push", "translation", "topology_change"},
+    "gravity_or_fall": {"movement_control", "line_or_beam", "gravity_or_fall"},
+    "targeted_recolor": {"component_delete", "targeted_recolor", "recoloration", "conditional_recolor"},
+    "component_delete": {"targeted_recolor", "component_delete", "conditional_recolor"},
+    "topology_change": {"drag_or_push", "movement_control", "topology_change"},
+}
+
 MECHANISM_TO_PROGRAM_KINDS: dict[str, set[str]] = {
     "movement_control": {"translation", "drag_component", "gravity"},
     "targeted_recolor": {"conditional_recolor", "component_recolor", "color_map"},
@@ -7160,9 +7214,11 @@ class MetacognitiveController:
             if p_kind and (p_kind == self.memory.transferred_winning_program_kind or p_kind == self.memory.transferred_winning_family):
                 score += 3.5
                 self.memory.productive_branch_commitment_used = True
+                self.memory.post_breakthrough_local_branch_reused = True
             if candidate.spec.name == self.memory.transferred_winning_action_name:
                 score += 2.5
                 self.memory.productive_branch_commitment_used = True
+                self.memory.post_breakthrough_local_branch_reused = True
             if self.memory.regrounded_winning_coords and candidate.spec.data:
                 c_dict = dict(candidate.spec.data)
                 if "x" in c_dict and "y" in c_dict:
@@ -7170,23 +7226,28 @@ class MetacognitiveController:
                     if dist <= 2:
                         score += 3.0
                         self.memory.productive_branch_commitment_used = True
+                        self.memory.post_breakthrough_local_branch_reused = True
 
-        # Productive-Branch Commitment & Dominance during near-terminal finish mode
+        # Productive-Branch Commitment & Dominance during near-terminal finish mode or structured persistence
         elif (
             self.memory.current_level_index == 0
             and not self.memory.post_breakthrough_window_active
-            and self.memory.near_terminal_finish_mode_active
+            and (self.memory.near_terminal_finish_mode_active or self.memory.structured_branch_persistence_used)
         ):
-            top_kinds = MECHANISM_TO_PROGRAM_KINDS.get(self.memory.near_terminal_finish_family, set())
+            target_family = self.memory.near_terminal_finish_family or self.memory.productive_branch_family_hint
+            top_kinds = MECHANISM_TO_PROGRAM_KINDS.get(target_family, set())
             p_kind = getattr(prediction, "kind", "") if prediction else ""
             
             # Check bound branch matching (source, anchor neighborhood, action name)
             is_bound_branch_match = False
-            if self.memory.finish_bound_branch_action_name and candidate.spec.name == self.memory.finish_bound_branch_action_name:
-                if self.memory.finish_bound_branch_anchor and candidate.spec.data:
+            bound_action = self.memory.finish_bound_branch_action_name or self.memory.productive_branch_action_name
+            bound_anchor = self.memory.finish_bound_branch_anchor or self.memory.productive_branch_anchor
+            
+            if bound_action and candidate.spec.name == bound_action:
+                if bound_anchor and candidate.spec.data:
                     c_dict = dict(candidate.spec.data)
                     if "x" in c_dict and "y" in c_dict:
-                        bx, by = self.memory.finish_bound_branch_anchor
+                        bx, by = bound_anchor
                         if max(abs(c_dict["x"] - bx), abs(c_dict["y"] - by)) <= 2:
                             is_bound_branch_match = True
                 elif not candidate.spec.data:
@@ -7197,15 +7258,18 @@ class MetacognitiveController:
                 self.memory.productive_branch_commitment_used = True
                 self.memory.finish_bound_branch_kept_control = True
                 self.memory.finish_branch_continuation_kept_control = True
-            elif p_kind and (p_kind == self.memory.near_terminal_finish_family or p_kind in top_kinds):
+                self.memory.structured_branch_persistence_kept_control = True
+            elif p_kind and (p_kind == target_family or p_kind in top_kinds):
                 score += 3.5
                 self.memory.productive_branch_commitment_used = True
-                self.memory.finish_branch_continuation_family = self.memory.near_terminal_finish_family
+                self.memory.finish_branch_continuation_family = target_family
                 self.memory.finish_branch_continuation_kept_control = True
-            elif candidate.spec.source == self.memory.near_terminal_finish_source:
+                self.memory.structured_branch_persistence_kept_control = True
+            elif candidate.spec.source in (self.memory.near_terminal_finish_source, self.memory.productive_branch_source):
                 score += 3.0
                 self.memory.productive_branch_commitment_used = True
                 self.memory.finish_branch_continuation_kept_control = True
+                self.memory.structured_branch_persistence_kept_control = True
 
         return score, decision, prediction
 
@@ -7312,7 +7376,13 @@ class MetacognitiveController:
             prediction = self._predict(scene, queued, profile)
             decision = self._verify(
                 scene, queued, legal_names, prediction, prediction is None, profile)
-            if decision.allowed:
+            # Permissive Queue Continuation for branch-consistent actions
+            is_branch_queued = (
+                self.memory.productive_branch_signature != ""
+                and queued.name == self.memory.productive_branch_action_name
+                and not self.dead.is_dead(signature)
+            )
+            if decision.allowed or (is_branch_queued and not any(r in ("illegal_action", "coordinate_out_of_bounds") for r in decision.reasons)):
                 pred_grid = prediction.grid if prediction and prediction.grid is not None else None
                 spec = ActionSpec(
                     name=queued.name, data=queued.data, source="verified_plan_queue",
@@ -7600,7 +7670,16 @@ class MetacognitiveController:
                         self.memory.post_breakthrough_aborted_reason = "continuation_fallback_forced"
                         self.post_breakthrough_stuck_mode_uses = 0
                 is_persisting = (self.memory.structured_branch_persistence_used and self.memory.structured_branch_persistence_steps < 4)
-                if not self.memory.post_breakthrough_window_active and not is_persisting:
+                is_live_branch = (
+                    self.memory.productive_branch_signature != ""
+                    and self.memory.productive_branch_streak >= 2
+                    and (step - self.memory.productive_branch_last_effective_step) <= 3
+                )
+                if is_live_branch or is_persisting:
+                    self.memory.productive_branch_preempt_blocked = True
+                    self.memory.productive_branch_preempt_block_reason = "live_productive_branch_active" if is_live_branch else "structured_persistence_active"
+
+                if not self.memory.post_breakthrough_window_active and not is_persisting and not is_live_branch:
                     exploratory.sort(key=lambda row: row[0], reverse=True)
                     score, best, decision = exploratory[0]
                     self.stuck_mode_activations += 1
