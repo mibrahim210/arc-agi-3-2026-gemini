@@ -642,6 +642,13 @@ class DiagnosticTraceRecord:
     transferred_winning_coords: Any = None
     post_breakthrough_aborted_reason: str = ""
     post_breakthrough_bias_used: bool = False
+    post_breakthrough_attempts: int = 0
+    post_breakthrough_effective_attempts: int = 0
+    post_breakthrough_noop_attempts: int = 0
+    post_breakthrough_failed_attempts: int = 0
+    post_breakthrough_continuation_bias: float = 0.0
+    post_breakthrough_local_search_used: bool = False
+    post_breakthrough_abort_reason: str = ""
     regrounded_winning_coords: Any = None
     regrounding_delta: Any = None
     regrounding_confidence: float = 0.0
@@ -1984,6 +1991,12 @@ class TraceMemory:
         self.transferred_winning_coords: tuple[int, int] | None = None
         self.post_breakthrough_aborted_reason: str = ""
         self.post_breakthrough_bias_used: bool = False
+        self.post_breakthrough_attempts: int = 0
+        self.post_breakthrough_effective_attempts: int = 0
+        self.post_breakthrough_noop_attempts: int = 0
+        self.post_breakthrough_failed_attempts: int = 0
+        self.post_breakthrough_continuation_bias: float = 0.0
+        self.post_breakthrough_local_search_used: bool = False
         self.regrounded_winning_coords: tuple[int, int] | None = None
         self.regrounding_delta: tuple[int, int] | None = None
         self.regrounding_confidence: float = 0.0
@@ -5653,6 +5666,19 @@ class CandidateGenerator:
                 for point in {(x0, y0), (x1, y0), (x0, y1), (x1, y1)}:
                     proposals.append((score - 0.35, point, "component_corner"))
 
+        # Bounded local continuation search around transferred/regrounded targets
+        reground_coords = self.memory.regrounded_winning_coords or self.memory.transferred_winning_coords
+        if (self.memory.post_breakthrough_window_active or self.memory.current_level_index > 0) and reground_coords is not None:
+            tx, ty = reground_coords
+            self.memory.post_breakthrough_local_search_used = True
+            for dy in range(-2, 3):
+                for dx in range(-2, 3):
+                    nx, ny = tx + dx, ty + dy
+                    if 0 <= nx < scene.width and 0 <= ny < scene.height:
+                        dist = max(abs(dx), abs(dy))
+                        local_score = 3.0 - 0.45 * dist - 0.15 * self.coordinate_visits[(nx, ny)]
+                        proposals.append((local_score, (nx, ny), "continuation_local_neighborhood"))
+
         # Raw representation is always available and dominates in field mode.
         for x, y in scene.changed_cells[-48:]:
             proposals.append(
@@ -6414,11 +6440,13 @@ class MetacognitiveController:
         if self.memory.recent_death_count(10) >= 3:
             return False, []
             
-        # Signal 1: First level progress already occurred or active post-breakthrough window
+        # Signal 1: First level progress already occurred, active post-breakthrough window, or level > 0 continuation
         if self.progress_events_this_level > 0 or self.memory.level_progress_events > 0:
             reasons.append("level_progress_occurred")
         if self.memory.post_breakthrough_window_active:
             reasons.append(f"post_breakthrough_window_active_{self.memory.transferred_winning_family}")
+        if self.memory.current_level_index > 0 and self.memory.regrounding_used:
+            reasons.append("level_continuation_regrounded_active")
             
         # Signal 2: High mechanism confidence
         if self.memory.top_mechanism_confidence >= 0.35:
@@ -6500,11 +6528,12 @@ class MetacognitiveController:
         prio_fams = self.memory.priority_program_families
         top_kinds = MECHANISM_TO_PROGRAM_KINDS.get(top_fam, set())
 
+        reground_coords = self.memory.regrounded_winning_coords or self.memory.transferred_winning_coords
         for cand in candidates:
             if cand.spec.name not in legal_names or self.dead.is_dead(cand.signature):
                 continue
             pred = self._predict(scene, cand.spec, profile)
-            decision = self._verify(scene, cand.spec, legal_names, pred, cand.is_probe, profile)
+            decision = self._verify(scene, cand.spec, legal_names, pred, cand.is_probe or (pred is None), profile)
             if not decision.allowed:
                 continue
             
@@ -6516,18 +6545,22 @@ class MetacognitiveController:
                     seed_score += 1.0
                 elif any(p_kind == pf or p_kind in MECHANISM_TO_PROGRAM_KINDS.get(pf, set()) for pf in prio_fams):
                     seed_score += 0.8
-            if self.memory.post_breakthrough_window_active:
+            if self.memory.post_breakthrough_window_active or self.memory.current_level_index > 0:
                 if p_kind and (p_kind == self.memory.transferred_winning_program_kind or p_kind == self.memory.transferred_winning_family):
-                    seed_score += 1.5
+                    seed_score += 2.0
                     applied_transfer_bias = True
                 if cand.spec.name == self.memory.transferred_winning_action_name:
-                    seed_score += 1.0
+                    seed_score += 1.5
                     applied_transfer_bias = True
-                if self.memory.transferred_winning_coords and cand.spec.data:
+                if reground_coords and cand.spec.data:
                     c_dict = dict(cand.spec.data)
                     if "x" in c_dict and "y" in c_dict:
-                        if abs(c_dict["x"] - self.memory.transferred_winning_coords[0]) + abs(c_dict["y"] - self.memory.transferred_winning_coords[1]) <= 2:
-                            seed_score += 0.8
+                        dist = max(abs(c_dict["x"] - reground_coords[0]), abs(c_dict["y"] - reground_coords[1]))
+                        if dist <= 2:
+                            seed_score += 1.8
+                            applied_transfer_bias = True
+                        elif dist <= 4:
+                            seed_score += 0.9
                             applied_transfer_bias = True
             scored_seeds.append((seed_score, cand, applied_transfer_bias))
 
@@ -6764,6 +6797,7 @@ class MetacognitiveController:
         self.reasoner_suppressed = False
         self.reasoner_suppression_reason = ""
         self.memory.post_breakthrough_bias_used = False
+        self.memory.post_breakthrough_continuation_bias = 0.0
         self.llm_step_meta = {
             "reasoner_consulted_this_step": False,
             "reasoner_parsed_abduction_this_step": False,
@@ -7212,13 +7246,24 @@ class MetacognitiveController:
                     score += self._priority_family_boost(prediction.kind)
                     if prediction.kind == self.memory.top_mechanism_family:
                         score += 0.8
-                    if self.memory.post_breakthrough_window_active:
+                    if self.memory.post_breakthrough_window_active or self.memory.current_level_index > 0:
+                        reground_coords = self.memory.regrounded_winning_coords or self.memory.transferred_winning_coords
                         if prediction.kind == self.memory.transferred_winning_program_kind or prediction.kind == self.memory.transferred_winning_family:
+                            score += 2.0
+                            applied_bias = True
+                            self.memory.post_breakthrough_continuation_bias += 2.0
+                        if candidate.spec.name == self.memory.transferred_winning_action_name:
                             score += 1.5
                             applied_bias = True
-                        if candidate.spec.name == self.memory.transferred_winning_action_name:
-                            score += 1.0
-                            applied_bias = True
+                            self.memory.post_breakthrough_continuation_bias += 1.5
+                        if reground_coords and candidate.spec.data:
+                            cd = dict(candidate.spec.data)
+                            if "x" in cd and "y" in cd:
+                                dist = max(abs(cd["x"] - reground_coords[0]), abs(cd["y"] - reground_coords[1]))
+                                if dist <= 2:
+                                    score += 1.8
+                                    applied_bias = True
+                                    self.memory.post_breakthrough_continuation_bias += 1.8
                 ranked.append((score, candidate, decision, prediction, applied_bias))
         if ranked:
             ranked.sort(key=lambda row: row[0], reverse=True)
@@ -7870,6 +7915,17 @@ class MyAgent(Agent):
         profile = _runtime_profile(pending_tier, self.config)
         self.memory.record(transition, self.pending_was_probe)
         self.dead.record(self.pending_signature, event)
+
+        # Continuation Failure Accounting
+        if self.memory.post_breakthrough_window_active:
+            self.memory.post_breakthrough_attempts += 1
+            if event.changed_count > 0 and not event.no_op and not event.game_over:
+                self.memory.post_breakthrough_effective_attempts += 1
+            if event.no_op:
+                self.memory.post_breakthrough_noop_attempts += 1
+                self.memory.post_breakthrough_failed_attempts += 1
+            elif event.game_over:
+                self.memory.post_breakthrough_failed_attempts += 1
         
         # Zero-tolerance NO-OP coordinate blacklisting in exploitation mode
         if (self.memory.mode == "exploitation_mode" or self.memory.post_breakthrough_window_active) and event.no_op and self.pending_action:
@@ -8120,6 +8176,13 @@ class MyAgent(Agent):
             transferred_winning_coords=self.memory.transferred_winning_coords,
             post_breakthrough_aborted_reason=str(self.memory.post_breakthrough_aborted_reason),
             post_breakthrough_bias_used=bool(self.pending_reasoning.get("post_breakthrough_bias_used", self.memory.post_breakthrough_bias_used)),
+            post_breakthrough_attempts=int(self.memory.post_breakthrough_attempts),
+            post_breakthrough_effective_attempts=int(self.memory.post_breakthrough_effective_attempts),
+            post_breakthrough_noop_attempts=int(self.memory.post_breakthrough_noop_attempts),
+            post_breakthrough_failed_attempts=int(self.memory.post_breakthrough_failed_attempts),
+            post_breakthrough_continuation_bias=float(self.memory.post_breakthrough_continuation_bias),
+            post_breakthrough_local_search_used=bool(self.memory.post_breakthrough_local_search_used),
+            post_breakthrough_abort_reason=str(self.memory.post_breakthrough_aborted_reason),
             regrounded_winning_coords=self.memory.regrounded_winning_coords,
             regrounding_delta=self.memory.regrounding_delta,
             regrounding_confidence=float(self.memory.regrounding_confidence),
