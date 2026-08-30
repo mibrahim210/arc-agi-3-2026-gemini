@@ -634,6 +634,14 @@ class DiagnosticTraceRecord:
     deep_search_time_ms: float = 0.0
     deep_search_selected_family: str = ""
     deep_search_aborted_reason: str = ""
+    post_breakthrough_window_active: bool = False
+    post_levelup_exploit_steps_remaining: int = 0
+    transferred_winning_family: str = ""
+    transferred_winning_program_kind: str = ""
+    transferred_winning_action_name: str = ""
+    transferred_winning_coords: Any = None
+    post_breakthrough_aborted_reason: str = ""
+    post_breakthrough_bias_used: bool = False
 
 
 @dataclass(slots=True)
@@ -1945,6 +1953,22 @@ class TraceMemory:
         self.recommended_probe_ttl: int = 0
         self.llm_last_mechanism_confidence: float = 0.5
         self.priority_program_ttl: int = 0
+        self.last_winning_action_name: str = ""
+        self.last_winning_program_kind: str = ""
+        self.last_winning_family: str = ""
+        self.last_winning_coords: tuple[int, int] | None = None
+        self.last_winning_source: str = ""
+        self.last_winning_mechanism_family: str = ""
+        self.last_winning_mechanism_confidence: float = 0.0
+        self.last_winning_step_in_level: int = 0
+        self.post_breakthrough_window_active: bool = False
+        self.post_breakthrough_window_steps_remaining: int = 0
+        self.transferred_winning_family: str = ""
+        self.transferred_winning_program_kind: str = ""
+        self.transferred_winning_action_name: str = ""
+        self.transferred_winning_coords: tuple[int, int] | None = None
+        self.post_breakthrough_aborted_reason: str = ""
+        self.post_breakthrough_bias_used: bool = False
 
     def reset_level(self) -> None:
         self.transitions.clear()
@@ -1972,34 +1996,61 @@ class TraceMemory:
         self.macro_replay_family = ""
         self.macro_replay_program_id = ""
         self.macro_replay_aborted_reason = ""
-        # Transfer only if high confidence; do NOT default to translation blindly
-        if self.top_mechanism_confidence >= 0.35 and self.top_mechanism_family:
+        # Seed post-breakthrough exploitation prior from stored winning pattern
+        if self.last_winning_family or self.last_winning_action_name or self.last_winning_program_kind:
+            self.post_breakthrough_window_active = True
+            # Fast early breakthrough (<= 50 steps) grants a longer 16-step window, otherwise 10 steps
+            self.post_breakthrough_window_steps_remaining = 16 if (0 < self.last_winning_step_in_level <= 50) else 10
+            self.transferred_winning_family = self.last_winning_family or self.last_winning_mechanism_family or self.top_mechanism_family
+            self.transferred_winning_program_kind = self.last_winning_program_kind
+            self.transferred_winning_action_name = self.last_winning_action_name
+            self.transferred_winning_coords = self.last_winning_coords
+            self.transferred_mechanism_family = self.transferred_winning_family
+            self.level_transition_transfer_used = True
+            self.post_breakthrough_aborted_reason = ""
+        elif self.top_mechanism_confidence >= 0.35 and self.top_mechanism_family:
             self.transferred_mechanism_family = self.top_mechanism_family
             self.level_transition_transfer_used = True
+            self.post_breakthrough_window_active = False
+            self.post_breakthrough_window_steps_remaining = 0
+            self.post_breakthrough_aborted_reason = ""
         else:
             self.transferred_mechanism_family = "undetermined"
             self.level_transition_transfer_used = False
+            self.post_breakthrough_window_active = False
+            self.post_breakthrough_window_steps_remaining = 0
+            self.post_breakthrough_aborted_reason = ""
 
         self.early_classified_mechanism = self.transferred_mechanism_family if self.transferred_mechanism_family != "undetermined" else ""
         self.counterfactual_pruned_count = 0
         self.negative_hypothesis_eliminations = 0
-        self.mode = "discovery_mode"
+        self.mode = "exploitation_mode" if self.post_breakthrough_window_active else "discovery_mode"
         self.mechanism_scores = {
-            "movement_control": 0.2 if self.transferred_mechanism_family == "movement_control" else 0.1,
-            "targeted_recolor": 0.2 if self.transferred_mechanism_family == "targeted_recolor" else 0.1,
-            "component_delete": 0.05, "drag_or_push": 0.05, "line_or_beam": 0.05, "flood_or_fill": 0.05,
-            "gravity_or_fall": 0.05, "copy_or_stamp": 0.05, "count_or_trigger": 0.05, "topology_switch": 0.05
+            "movement_control": 0.35 if self.transferred_mechanism_family == "movement_control" else 0.08,
+            "targeted_recolor": 0.35 if self.transferred_mechanism_family == "targeted_recolor" else 0.08,
+            "component_delete": 0.35 if self.transferred_mechanism_family == "component_delete" else 0.05,
+            "drag_or_push": 0.35 if self.transferred_mechanism_family == "drag_or_push" else 0.05,
+            "line_or_beam": 0.35 if self.transferred_mechanism_family == "line_or_beam" else 0.05,
+            "flood_or_fill": 0.35 if self.transferred_mechanism_family == "flood_or_fill" else 0.05,
+            "gravity_or_fall": 0.35 if self.transferred_mechanism_family == "gravity_or_fall" else 0.05,
+            "copy_or_stamp": 0.35 if self.transferred_mechanism_family == "copy_or_stamp" else 0.05,
+            "count_or_trigger": 0.35 if self.transferred_mechanism_family == "count_or_trigger" else 0.05,
+            "topology_switch": 0.35 if self.transferred_mechanism_family == "topology_switch" else 0.05,
         }
         self.top_mechanism_family = max(self.mechanism_scores, key=self.mechanism_scores.get)
-        self.top_mechanism_confidence = 0.2
-        self.competing_mechanism_families = ["movement_control", "targeted_recolor"]
-        self.priority_program_families = []
+        self.top_mechanism_confidence = 0.40 if self.post_breakthrough_window_active else 0.20
+        self.competing_mechanism_families = [self.top_mechanism_family]
+        if self.transferred_winning_program_kind:
+            self.priority_program_families = [self.transferred_winning_program_kind]
+            self.priority_program_ttl = self.post_breakthrough_window_steps_remaining
+        else:
+            self.priority_program_families = []
+            self.priority_program_ttl = 0
         self.invariants_to_preserve.clear()
         self.mechanism_shift_event = False
         self.recommended_probe_type = ""
         self.recommended_probe_ttl = 0
         self.llm_last_mechanism_confidence = 0.5
-        self.priority_program_ttl = 0
 
     def reset_attempt(self) -> None:
         # Preserve learned transitions, state-action counts, global outcomes, and
@@ -6056,6 +6107,34 @@ class MetacognitiveController:
             return None
         return self.programs.predict_grid(scene.grid, spec, scene)
 
+    def _update_post_breakthrough_window(self, step: int = 0) -> None:
+        if not self.memory.post_breakthrough_window_active:
+            return
+        
+        # Contradiction check: repeated no-ops
+        if self.memory.no_op_streak >= 5:
+            self.memory.post_breakthrough_window_active = False
+            self.memory.post_breakthrough_aborted_reason = "high_noop_contradiction"
+            return
+        # Contradiction check: repeated deaths
+        if self.memory.recent_death_count(5) >= 2:
+            self.memory.post_breakthrough_window_active = False
+            self.memory.post_breakthrough_aborted_reason = "death_risk_contradiction"
+            return
+
+        # Contradiction check: zero state changes across recent steps
+        recent = list(self.memory.transitions)[-6:]
+        if len(recent) >= 6 and all(t.event.changed_count == 0 for t in recent):
+            self.memory.post_breakthrough_window_active = False
+            self.memory.post_breakthrough_aborted_reason = "zero_state_change_contradiction"
+            return
+
+        # Decrement window steps
+        self.memory.post_breakthrough_window_steps_remaining -= 1
+        if self.memory.post_breakthrough_window_steps_remaining <= 0:
+            self.memory.post_breakthrough_window_active = False
+            self.memory.post_breakthrough_aborted_reason = "window_expired"
+
     def _update_mechanism_beliefs(self, step: int = 0) -> None:
         if not self.memory.transitions:
             return
@@ -6201,9 +6280,11 @@ class MetacognitiveController:
         if self.memory.recent_death_count(10) >= 3:
             return False, []
             
-        # Signal 1: First level progress already occurred
+        # Signal 1: First level progress already occurred or active post-breakthrough window
         if self.progress_events_this_level > 0 or self.memory.level_progress_events > 0:
             reasons.append("level_progress_occurred")
+        if self.memory.post_breakthrough_window_active:
+            reasons.append(f"post_breakthrough_window_active_{self.memory.transferred_winning_family}")
             
         # Signal 2: High mechanism confidence
         if self.memory.top_mechanism_confidence >= 0.35:
@@ -6589,6 +6670,7 @@ class MetacognitiveController:
 
         # Scored mechanism belief update & mode setting
         self._update_mechanism_beliefs(step=step)
+        self._update_post_breakthrough_window(step=step)
 
         # 2a-0) Instant Reflex Fast-Path (Sub-millisecond execution for forced/unambiguous winning moves)
         active_goals = self.goals.active(limit=2)
@@ -7550,6 +7632,29 @@ class MyAgent(Agent):
                 self.memory.follow_through_led_to_progress = True
             self.memory.llm_follow_through_recent_steps -= 1
 
+        # Record winning pattern at progress time
+        if event.level_delta > 0 or event.win:
+            p_data = self.pending_action.data_dict if self.pending_action else {}
+            coords = (p_data["x"], p_data["y"]) if ("x" in p_data and "y" in p_data) else None
+            p_kind = self.pending_reasoning.get("program_kind") or self.pending_reasoning.get("program_family") or ""
+            if not p_kind and self.pending_action and self.pending_action.program_id:
+                p_obj = self.programs.programs.get(self.pending_action.program_id) if hasattr(self.programs, "programs") and isinstance(self.programs.programs, dict) else None
+                if p_obj:
+                    p_kind = getattr(p_obj, "kind", "")
+            
+            top_fam = self.memory.top_mechanism_family
+            top_conf = self.memory.top_mechanism_confidence
+            action_src = self.pending_reasoning.get("final_action_source", "") or getattr(self.pending_action, "source", "")
+
+            self.memory.last_winning_action_name = self.pending_action.name if self.pending_action else ""
+            self.memory.last_winning_program_kind = p_kind
+            self.memory.last_winning_family = top_fam if top_fam else ""
+            self.memory.last_winning_coords = coords
+            self.memory.last_winning_source = action_src
+            self.memory.last_winning_mechanism_family = top_fam
+            self.memory.last_winning_mechanism_confidence = top_conf
+            self.memory.last_winning_step_in_level = self.memory.level_steps
+
         # Seed bounded macro replay if a directional translation or verified program succeeded
         if self.pending_reasoning.get("final_action_source") in ("milestone_model_verified", "milestone_model_goal_verified", "llm_program", "llm_follow_through", "counterfactual_program"):
             if not event.no_op and not event.game_over:
@@ -7708,6 +7813,14 @@ class MyAgent(Agent):
             deep_search_time_ms=float(self.pending_reasoning.get("deep_search_time_ms", 0.0)),
             deep_search_selected_family=str(self.pending_reasoning.get("deep_search_selected_family", "")),
             deep_search_aborted_reason=str(self.pending_reasoning.get("deep_search_aborted_reason", "")),
+            post_breakthrough_window_active=bool(self.memory.post_breakthrough_window_active),
+            post_levelup_exploit_steps_remaining=int(self.memory.post_breakthrough_window_steps_remaining),
+            transferred_winning_family=str(self.memory.transferred_winning_family),
+            transferred_winning_program_kind=str(self.memory.transferred_winning_program_kind),
+            transferred_winning_action_name=str(self.memory.transferred_winning_action_name),
+            transferred_winning_coords=self.memory.transferred_winning_coords,
+            post_breakthrough_aborted_reason=str(self.memory.post_breakthrough_aborted_reason),
+            post_breakthrough_bias_used=bool(self.memory.post_breakthrough_bias_used),
             llm_top_productive_family=max(self.controller.memory.llm_family_payoff.items(), key=lambda x: x[1].get("changed", 0))[0] if self.controller.memory.llm_family_payoff else "",
             llm_top_unproductive_family=max(self.controller.memory.llm_family_payoff.items(), key=lambda x: (x[1].get("noop", 0) + x[1].get("death", 0)))[0] if self.controller.memory.llm_family_payoff else "",
             llm_family_payoff_summary={
