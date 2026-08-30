@@ -5815,6 +5815,15 @@ class CandidateGenerator:
             ]
         )
 
+        # In Component-Delete mode: strongly filter generic background-only coordinate candidates
+        if is_comp_delete:
+            live_comp_proposals = [
+                (score, point, why) for score, point, why in proposals
+                if (0 <= point[0] < scene.width and 0 <= point[1] < scene.height and scene.grid[point[1], point[0]] != scene.background)
+            ]
+            if live_comp_proposals:
+                proposals = live_comp_proposals
+
         best_by_point: dict[Point, tuple[float, str]] = {}
         for score, point, why in proposals:
             x, y = point
@@ -6397,6 +6406,30 @@ class MetacognitiveController:
         total = sum(self.memory.mechanism_scores.values()) or 1.0
         prev_top = self.memory.top_mechanism_family
         sorted_fams = sorted(self.memory.mechanism_scores.items(), key=lambda x: -x[1])
+        top_cand_family = sorted_fams[0][0]
+
+        # Mechanism-Family Collapse Breaker on Level 0
+        if self.memory.current_level_index == 0 and not self.memory.post_breakthrough_window_active:
+            if top_cand_family:
+                self.memory.family_stagnation_steps[top_cand_family] = self.memory.family_stagnation_steps.get(top_cand_family, 0) + 1
+                if (
+                    self.memory.family_stagnation_steps[top_cand_family] >= 20
+                    and self.memory.level_progress_events == 0
+                    and len(sorted_fams) > 1
+                ):
+                    penalized_family = top_cand_family
+                    promoted_family = sorted_fams[1][0]
+                    # Temporarily down-rank stalled dominant family and boost runner-up
+                    self.memory.mechanism_scores[penalized_family] = max(0.05, self.memory.mechanism_scores.get(penalized_family, 0.5) * 0.30)
+                    self.memory.mechanism_scores[promoted_family] = min(1.0, self.memory.mechanism_scores.get(promoted_family, 0.2) + 0.45)
+                    self.memory.mechanism_collapse_breaker_used = True
+                    self.memory.mechanism_family_penalized = penalized_family
+                    self.memory.mechanism_family_promoted = promoted_family
+                    self.memory.family_stagnation_steps[penalized_family] = 0
+                    # Re-sort after applying breaker
+                    total = sum(self.memory.mechanism_scores.values()) or 1.0
+                    sorted_fams = sorted(self.memory.mechanism_scores.items(), key=lambda x: -x[1])
+
         self.memory.top_mechanism_family = sorted_fams[0][0]
         self.memory.top_mechanism_confidence = round(sorted_fams[0][1] / max(1.0, total), 3)
         self.memory.competing_mechanism_families = [f[0] for f in sorted_fams[:3]]
@@ -8003,8 +8036,16 @@ class MyAgent(Agent):
         self.memory.record(transition, self.pending_was_probe)
         self.dead.record(self.pending_signature, event)
 
-        # 1. Productive Counterfactual Streak Renewal
-        if event.changed_count > 0 and not event.no_op and not event.game_over:
+        # 1. Productive Counterfactual Streak Renewal (Properly scoped to counterfactual stages)
+        pending_stage = str(self.pending_reasoning.get("stage", ""))
+        pending_src = str(self.pending_reasoning.get("final_action_source", ""))
+        is_cf_selected = ("counterfactual" in pending_stage or "counterfactual" in pending_src or (self.pending_action and "counterfactual" in getattr(self.pending_action, "source", "")))
+        if (
+            is_cf_selected
+            and event.changed_count > 0
+            and not event.no_op
+            and not event.game_over
+        ):
             self.controller.counterfactual_streak = 0
             self.memory.counterfactual_streak_renewed = True
 
