@@ -5818,11 +5818,13 @@ class CandidateGenerator:
             for comp in scene.components:
                 x, y = int(round(comp.centroid[0])), int(
                     round(comp.centroid[1]))
-                rarity = 1.0 - min(1.0, color_freq.get(comp.color, 1.0) * 12.0)
-                small = 1.0 / math.sqrt(max(1, comp.area))
-                score = 2.0 * rarity + 1.1 * small + \
-                    (0.2 if comp.touches_border else 0.0)
-                score -= 0.20 * self.coordinate_visits[(x, y)]
+                is_border = (y <= 2 or x <= 2 or y >= scene.height - 3 or x >= scene.width - 3)
+                if is_border:
+                    score = 0.8 - 0.20 * self.coordinate_visits[(x, y)]
+                else:
+                    rarity = 1.0 - min(1.0, color_freq.get(comp.color, 1.0) * 12.0)
+                    small = 1.0 / math.sqrt(max(1, comp.area))
+                    score = 2.0 * rarity + 1.1 * small - 0.20 * self.coordinate_visits[(x, y)]
                 proposals.append((score, (x, y), "rare_small_component"))
                 x0, y0, x1, y1 = comp.bbox
                 for point in {(x0, y0), (x1, y0), (x0, y1), (x1, y1)}:
@@ -5864,8 +5866,10 @@ class CandidateGenerator:
             rarity = 1.0 - min(1.0, count / total * 16.0)
             for idx in sample_indices:
                 point = (int(xs[idx]), int(ys[idx]))
+                is_border = (point[1] <= 2 or point[0] <= 2 or point[1] >= scene.height - 3 or point[0] >= scene.width - 3)
+                base = 1.2 if not is_border else 0.4
                 proposals.append(
-                    (1.2 + rarity - 0.12 * self.coordinate_visits[point], point, "raw_rare_color"))
+                    (base + rarity - 0.12 * self.coordinate_visits[point], point, "raw_rare_color"))
 
         # Component-Delete Coordinate Hardening: Restrict to active non-background connected components with payoff ranking
         is_comp_delete = (self.memory.top_mechanism_family == "component_delete" and self.memory.top_mechanism_confidence >= 0.28 and len(self.memory.transitions) >= 4)
@@ -5875,14 +5879,17 @@ class CandidateGenerator:
             sorted_comps = sorted(scene.components, key=lambda c: c.area)
             for comp in sorted_comps:
                 if comp.color != scene.background:
-                    size_bonus = 1.0 if comp.area <= 4 else (0.5 if comp.area <= 12 else 0.0)
                     cx, cy = int(round(comp.centroid[0])), int(round(comp.centroid[1]))
+                    if cx <= 2 or cy <= 2 or cx >= scene.width - 3 or cy >= scene.height - 3:
+                        continue
+                    size_bonus = 1.0 if comp.area <= 4 else (0.5 if comp.area <= 12 else 0.0)
                     proposals.append((3.2 + size_bonus - 0.15 * self.coordinate_visits[(cx, cy)], (cx, cy), "comp_delete_live_centroid"))
                     x0, y0, x1, y1 = comp.bbox
                     bx, by = (x0 + x1) // 2, (y0 + y1) // 2
                     proposals.append((3.0 + size_bonus - 0.15 * self.coordinate_visits[(bx, by)], (bx, by), "comp_delete_live_bbox_center"))
                     for cell in comp.cells[:6]:
-                        proposals.append((2.8 + size_bonus - 0.15 * self.coordinate_visits[cell], cell, "comp_delete_live_cell"))
+                        if cell[0] > 2 and cell[1] > 2 and cell[0] < scene.width - 3 and cell[1] < scene.height - 3:
+                            proposals.append((2.8 + size_bonus - 0.15 * self.coordinate_visits[cell], cell, "comp_delete_live_cell"))
                     self.memory.component_delete_payoff_bias_used = True
 
         # Structured Line-or-Beam Proposals: Interpolate ray/axis coordinates between matching endpoints and corner closures
@@ -5895,8 +5902,12 @@ class CandidateGenerator:
                 ys, xs = np.where(scene.grid == color)
                 for i in range(len(xs)):
                     p1_x, p1_y = int(xs[i]), int(ys[i])
+                    if p1_x <= 2 or p1_y <= 2 or p1_x >= scene.width - 3 or p1_y >= scene.height - 3:
+                        continue
                     for j in range(i + 1, len(xs)):
                         p2_x, p2_y = int(xs[j]), int(ys[j])
+                        if p2_x <= 2 or p2_y <= 2 or p2_x >= scene.width - 3 or p2_y >= scene.height - 3:
+                            continue
                         if p1_x == p2_x:
                             min_y, max_y = min(p1_y, p2_y), max(p1_y, p2_y)
                             for y_mid in range(min_y, max_y + 1):
@@ -5979,11 +5990,20 @@ class CandidateGenerator:
                 point = (mid_x, mid_y)
                 proposals.append((1.8 - 0.12 * self.coordinate_visits[point], point, "pair_midpoint_anchor"))
 
-        # Color Boundary Entropy Anchors (Transitions between distinct colors)
+        # Color Boundary Entropy Anchors (Transitions between distinct interior colors)
         try:
             grid = scene.grid
-            h_boundaries = (grid[:, :-1] != grid[:, 1:])
-            v_boundaries = (grid[:-1, :] != grid[1:, :])
+            h_boundaries = (grid[:, :-1] != grid[:, 1:]).copy()
+            v_boundaries = (grid[:-1, :] != grid[1:, :]).copy()
+            # Zero out border UI rows so interior puzzle boundaries are extracted
+            h_boundaries[:3, :] = False
+            h_boundaries[-3:, :] = False
+            h_boundaries[:, :3] = False
+            h_boundaries[:, -3:] = False
+            v_boundaries[:3, :] = False
+            v_boundaries[-3:, :] = False
+            v_boundaries[:, :3] = False
+            v_boundaries[:, -3:] = False
             hy, hx = np.where(h_boundaries)
             vy, vx = np.where(v_boundaries)
             for x, y in zip(hx[:24], hy[:24]):
@@ -7116,14 +7136,16 @@ class MetacognitiveController:
             if not base_decision.allowed:
                 return base_decision
                 
-        # Bounded Coordinate Exclusion & Fatigue
+        # Bounded Coordinate Exclusion & Fatigue (exempt palette rows / border selectors)
         if "x" in data and "y" in data:
-            exact_visits = self.memory.spatial_visits_by_action.get((spec.name, data["x"], data["y"]), 0)
-            if exact_visits >= 3:
-                return AlignmentDecision(False, -10.0, -1.0, 1.0, (), ("coordinate_fatigue",))
+            is_palette_or_border = (data["y"] <= 2 or data["x"] <= 2 or data["y"] >= scene.height - 3 or data["x"] >= scene.width - 3)
+            if not is_palette_or_border:
+                exact_visits = self.memory.spatial_visits_by_action.get((spec.name, data["x"], data["y"]), 0)
+                if exact_visits >= 3:
+                    return AlignmentDecision(False, -10.0, -1.0, 1.0, (), ("coordinate_fatigue",))
             
             visits = self.memory.spatial_visits.get((data["x"], data["y"]), 0)
-            if visits > 0:
+            if visits > 0 and not is_palette_or_border:
                 penalty = visits * 2.0
                 if base_decision is not None:
                     base_decision = AlignmentDecision(base_decision.allowed, base_decision.score - penalty, base_decision.goal_delta, base_decision.risk, base_decision.goal_ids, base_decision.reasons + ("spatial_penalty",))
@@ -7204,16 +7226,17 @@ class MetacognitiveController:
         if prediction is not None:
             score += 0.8 * prediction.confidence - 0.6 * prediction.uncertainty
 
-        # Post-Breakthrough Priority: Give transferred actions/regrounded coords highest priority
+        # 1. Post-Breakthrough Priority: Transferred winning actions/regrounded coords outrank finish mode and fallback
         if self.memory.post_breakthrough_window_active or self.memory.current_level_index > 0:
             self.memory.post_breakthrough_priority_preserved = True
+            self.memory.post_breakthrough_preempt_block_reason = "transferred_level_priors_active"
             p_kind = getattr(prediction, "kind", "") if prediction else ""
             if p_kind and (p_kind == self.memory.transferred_winning_program_kind or p_kind == self.memory.transferred_winning_family):
-                score += 3.5
+                score += 4.5
                 self.memory.productive_branch_commitment_used = True
                 self.memory.post_breakthrough_local_branch_reused = True
             if candidate.spec.name == self.memory.transferred_winning_action_name:
-                score += 2.5
+                score += 3.5
                 self.memory.productive_branch_commitment_used = True
                 self.memory.post_breakthrough_local_branch_reused = True
             if self.memory.regrounded_winning_coords and candidate.spec.data:
@@ -7221,11 +7244,11 @@ class MetacognitiveController:
                 if "x" in c_dict and "y" in c_dict:
                     dist = max(abs(c_dict["x"] - self.memory.regrounded_winning_coords[0]), abs(c_dict["y"] - self.memory.regrounded_winning_coords[1]))
                     if dist <= 2:
-                        score += 3.0
+                        score += 4.0
                         self.memory.productive_branch_commitment_used = True
                         self.memory.post_breakthrough_local_branch_reused = True
 
-        # Productive-Branch Commitment & Dominance during near-terminal finish mode or structured persistence
+        # 2. Productive-Branch Commitment & Structured Persistence Dominance during Level 0 finish mode or active persistence
         elif (
             self.memory.current_level_index == 0
             and not self.memory.post_breakthrough_window_active
@@ -7250,16 +7273,19 @@ class MetacognitiveController:
                 elif not candidate.spec.data:
                     is_bound_branch_match = True
 
-            if is_bound_branch_match:
-                score += 4.0
-                self.memory.productive_branch_commitment_used = True
-                self.memory.finish_bound_branch_kept_control = True
-                self.memory.finish_branch_continuation_kept_control = True
-                self.memory.structured_branch_persistence_kept_control = True
-            elif p_kind and (p_kind == target_family or p_kind in top_kinds):
+            if p_kind and (p_kind == target_family or p_kind in top_kinds):
                 score += 3.5
                 self.memory.productive_branch_commitment_used = True
                 self.memory.finish_branch_continuation_family = target_family
+                self.memory.finish_branch_continuation_kept_control = True
+                self.memory.structured_branch_persistence_kept_control = True
+                if is_bound_branch_match:
+                    score += 1.0
+                    self.memory.finish_bound_branch_kept_control = True
+            elif is_bound_branch_match:
+                score += 3.5
+                self.memory.productive_branch_commitment_used = True
+                self.memory.finish_bound_branch_kept_control = True
                 self.memory.finish_branch_continuation_kept_control = True
                 self.memory.structured_branch_persistence_kept_control = True
             elif candidate.spec.source in (self.memory.near_terminal_finish_source, self.memory.productive_branch_source):
@@ -7580,6 +7606,17 @@ class MetacognitiveController:
                 }
 
         # 2c) Evidence-Guided Novelty Explorer
+        is_persisting = (self.memory.structured_branch_persistence_used and self.memory.structured_branch_persistence_steps_remaining > 0)
+        is_live_branch = (
+            self.memory.productive_branch_signature != ""
+            and self.memory.productive_branch_streak >= 2
+            and (step - self.memory.productive_branch_last_effective_step) <= 3
+            and (
+                self.memory.counterfactual_completion_bias > 0.0
+                or self.memory.productive_search_convergence_pressure >= 1.0
+                or (self.memory.productive_branch_anchor is not None and self.memory.productive_branch_anchor[1] > 2 and self.memory.productive_branch_anchor[0] > 2)
+            )
+        )
         repeated_effect = self.memory.repeated_effect_signature()
         if (
             self.steps_since_progress >= max(18, self.config.no_progress_exhaustion_threshold)
@@ -7666,16 +7703,23 @@ class MetacognitiveController:
                         self.memory.post_breakthrough_window_active = False
                         self.memory.post_breakthrough_aborted_reason = "continuation_fallback_forced"
                         self.post_breakthrough_stuck_mode_uses = 0
-                is_persisting = (self.memory.structured_branch_persistence_used and self.memory.structured_branch_persistence_steps < 4)
+                is_persisting = (self.memory.structured_branch_persistence_used and self.memory.structured_branch_persistence_steps_remaining > 0)
                 is_live_branch = (
                     self.memory.productive_branch_signature != ""
                     and self.memory.productive_branch_streak >= 2
                     and (step - self.memory.productive_branch_last_effective_step) <= 3
                 )
-                if is_live_branch or is_persisting:
+                if self.memory.post_breakthrough_window_active:
                     self.memory.productive_branch_preempt_blocked = True
-                    self.memory.productive_branch_preempt_block_reason = "live_productive_branch_active" if is_live_branch else "structured_persistence_active"
+                    self.memory.productive_branch_preempt_block_reason = "post_breakthrough_continuation_active"
+                elif is_persisting:
+                    self.memory.productive_branch_preempt_blocked = True
+                    self.memory.productive_branch_preempt_block_reason = "structured_persistence_active"
+                elif is_live_branch:
+                    self.memory.productive_branch_preempt_blocked = True
+                    self.memory.productive_branch_preempt_block_reason = "live_productive_branch_active"
 
+                # Inline guard: Never allow stuck-mode exploration to steal control when post-breakthrough, structured persistence, or live branch is active
                 if not self.memory.post_breakthrough_window_active and not is_persisting and not is_live_branch:
                     exploratory.sort(key=lambda row: row[0], reverse=True)
                     score, best, decision = exploratory[0]
@@ -7688,7 +7732,7 @@ class MetacognitiveController:
                     return spec, True, {"stage": "stuck_mode_exploration", "final_action_source": "stuck_mode_exploration", "score": round(score, 3)}
             
         # 2b) Forced Structural Probe (Boredom Override)
-        if self.memory.same_family_streak >= 10:
+        if self.memory.same_family_streak >= 10 and not self.memory.post_breakthrough_window_active and not is_persisting and not is_live_branch:
             dominant_family = self.memory.transitions[-1].action.name if self.memory.transitions else ""
             probes = []
             for candidate in candidates:
@@ -8496,6 +8540,18 @@ class MyAgent(Agent):
         pending_tier = str(self.pending_reasoning.get(
             "runtime_tier", self.runtime.tier()))
         profile = _runtime_profile(pending_tier, self.config)
+        # Reset per-step transition telemetry flags at start of transition processing
+        self.memory.productive_branch_family_wobble_tolerated = False
+        self.memory.productive_branch_family_wobble_reason = ""
+        self.memory.productive_window_extended = False
+        self.memory.productive_window_extension_reason = ""
+        self.memory.productive_branch_collision_recovery_used = False
+        self.memory.productive_branch_collision_recovery_variant = ""
+        self.memory.productive_branch_collision_recovery_preserved_family = False
+        self.memory.productive_branch_preempt_blocked = False
+        self.memory.productive_branch_preempt_block_reason = ""
+        self.memory.collision_soft_retry_used = False
+        self.memory.collision_soft_retry_variant = ""
         self.memory.record(transition, self.pending_was_probe)
         self.dead.record(self.pending_signature, event)
 
@@ -8546,17 +8602,25 @@ class MyAgent(Agent):
                     self.memory.finish_mode_noop_streak += 1
                 else:
                     self.memory.finish_mode_noop_streak = 0
+                    # 7. Extend productive window only when real evidence of non-noop progress continues near anchor
+                    if self.memory.near_terminal_finish_steps_remaining <= 2 and self.memory.finish_branch_continuation_steps < 8:
+                        self.memory.near_terminal_finish_steps_remaining += 2
+                        self.memory.productive_window_extended = True
+                        self.memory.productive_window_extension_reason = "continuous_local_non_noop_change"
 
                 if event.level_delta > 0 or self.memory.current_level_index > 0:
                     self.memory.near_terminal_finish_mode_active = False
                     self.memory.near_terminal_finish_exit_reason = "level_cleared"
                     self.memory.finish_branch_continuation_break_reason = "level_cleared"
                 elif getattr(event, "death", False) or event.game_over:
-                    # Collision-aware soft retry before abandonment
+                    # 8. Collision-aware local retry before abandonment
                     if self.memory.collision_soft_retry_count < 2:
                         self.memory.collision_soft_retry_count += 1
                         self.memory.collision_soft_retry_used = True
+                        self.memory.productive_branch_collision_recovery_used = True
                         self.memory.collision_soft_retry_variant = "orthogonal_turn" if self.memory.recommended_orthogonal_turn else "neighbor_variant"
+                        self.memory.productive_branch_collision_recovery_variant = self.memory.collision_soft_retry_variant
+                        self.memory.productive_branch_collision_recovery_preserved_family = True
                         self.memory.near_terminal_finish_steps_remaining = 2
                     else:
                         self.memory.near_terminal_finish_mode_active = False
@@ -8575,9 +8639,15 @@ class MyAgent(Agent):
                     self.memory.near_terminal_finish_exit_reason = "noop_streak_exhaustion"
                     self.memory.finish_branch_continuation_break_reason = "noop_streak_exhaustion"
                 elif self.memory.top_mechanism_confidence >= 0.65 and self.memory.top_mechanism_family != self.memory.near_terminal_finish_family:
-                    self.memory.near_terminal_finish_mode_active = False
-                    self.memory.near_terminal_finish_exit_reason = "mechanism_family_shift"
-                    self.memory.finish_branch_continuation_break_reason = "mechanism_family_shift"
+                    # 6. Promote branch persistence across related family wobble
+                    related = RELATED_MECHANISM_FAMILIES.get(self.memory.near_terminal_finish_family, set())
+                    if self.memory.top_mechanism_family in related and self.memory.finish_mode_noop_streak == 0:
+                        self.memory.productive_branch_family_wobble_tolerated = True
+                        self.memory.productive_branch_family_wobble_reason = f"tolerated_wobble_to_{self.memory.top_mechanism_family}"
+                    else:
+                        self.memory.near_terminal_finish_mode_active = False
+                        self.memory.near_terminal_finish_exit_reason = "mechanism_family_shift"
+                        self.memory.finish_branch_continuation_break_reason = "mechanism_family_shift"
                 else:
                     self.memory.near_terminal_finish_steps_remaining -= 1
                     if self.memory.near_terminal_finish_steps_remaining <= 0:
@@ -8585,25 +8655,66 @@ class MyAgent(Agent):
                         self.memory.near_terminal_finish_exit_reason = "finish_window_expired"
                         self.memory.finish_branch_continuation_break_reason = "finish_window_expired"
 
-            # 4. Structured Branch Persistence tracking
+            # 1. Track Concrete Productive Branch in Memory
+            p_stage = str(self.pending_reasoning.get("stage", ""))
+            p_action_name = self.pending_action.name if self.pending_action else ""
+            p_anchor = None
+            if self.pending_action and self.pending_action.data:
+                p_dict = dict(self.pending_action.data)
+                if "x" in p_dict and "y" in p_dict:
+                    p_anchor = (p_dict["x"], p_dict["y"])
+
+            if event.changed_count > 0 and not event.no_op and not event.game_over:
+                p_sig = f"{p_stage}:{p_action_name}:{p_anchor}"
+                is_same_neighborhood = False
+                if self.memory.productive_branch_anchor and p_anchor:
+                    bx, by = self.memory.productive_branch_anchor
+                    px, py = p_anchor
+                    if max(abs(px - bx), abs(py - by)) <= 3:
+                        is_same_neighborhood = True
+                elif not p_anchor and not self.memory.productive_branch_anchor:
+                    is_same_neighborhood = True
+
+                if (self.memory.productive_branch_signature == p_sig) or (is_same_neighborhood and self.memory.productive_branch_action_name == p_action_name):
+                    self.memory.productive_branch_streak += 1
+                else:
+                    self.memory.productive_branch_signature = p_sig
+                    self.memory.productive_branch_source = p_stage
+                    self.memory.productive_branch_action_name = p_action_name
+                    self.memory.productive_branch_anchor = p_anchor
+                    self.memory.productive_branch_family_hint = self.memory.top_mechanism_family
+                    self.memory.productive_branch_program_kind = str(self.pending_reasoning.get("program_kind", ""))
+                    self.memory.productive_branch_streak = 1
+                self.memory.productive_branch_last_effective_step = self.step_index
+            elif event.no_op or event.game_over:
+                if self.memory.no_op_streak >= 2:
+                    self.memory.productive_branch_streak = 0
+
+            # 4. Structured Branch Persistence: activate and hold control for 6 steps
+            has_completion_signal = (
+                self.memory.productive_search_convergence_pressure >= 0.5
+                or self.memory.counterfactual_completion_bias > 0.0
+                or self.memory.consecutive_completion_signals >= 1
+            )
             if (
-                is_cf_selected
+                (self.memory.productive_branch_streak >= 2 or is_cf_selected)
                 and event.changed_count > 0
                 and not event.no_op
                 and not event.game_over
-                and self.memory.productive_search_convergence_pressure >= 1.5
+                and has_completion_signal
             ):
                 self.memory.structured_branch_persistence_used = True
                 self.memory.structured_branch_persistence_steps += 1
+                self.memory.structured_branch_persistence_steps_remaining = max(1, 6 - self.memory.structured_branch_persistence_steps)
                 self.memory.structured_branch_persistence_break_reason = ""
             elif self.memory.structured_branch_persistence_used:
-                if event.no_op:
+                if event.no_op and self.memory.finish_mode_noop_streak >= 2:
                     self.memory.structured_branch_persistence_used = False
-                    self.memory.structured_branch_persistence_break_reason = "noop"
+                    self.memory.structured_branch_persistence_break_reason = "repeated_noop"
                 elif event.game_over:
                     self.memory.structured_branch_persistence_used = False
                     self.memory.structured_branch_persistence_break_reason = "game_over"
-                elif self.memory.structured_branch_persistence_steps >= 4:
+                elif self.memory.structured_branch_persistence_steps >= 6:
                     self.memory.structured_branch_persistence_used = False
                     self.memory.structured_branch_persistence_break_reason = "window_expired"
 
@@ -8672,6 +8783,9 @@ class MyAgent(Agent):
                         else:
                             self.memory.finish_bound_branch_anchor = None
 
+                        self.memory.finish_bound_branch_signature = self.memory.productive_branch_signature
+                        self.memory.finish_bound_branch_source = self.memory.productive_branch_source or p_stage
+                        self.memory.finish_bound_branch_action_name = self.memory.productive_branch_action_name or p_action_name
                         self.memory.near_terminal_finish_trigger_reason = (
                             "family_consensus" if gate_family else ("branch_consensus" if gate_branch else "completion_stability")
                         )
