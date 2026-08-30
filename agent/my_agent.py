@@ -642,6 +642,15 @@ class DiagnosticTraceRecord:
     transferred_winning_coords: Any = None
     post_breakthrough_aborted_reason: str = ""
     post_breakthrough_bias_used: bool = False
+    regrounded_winning_coords: Any = None
+    regrounding_delta: Any = None
+    regrounding_confidence: float = 0.0
+    regrounding_used: bool = False
+    regrounding_failed_reason: str = ""
+    levelup_relocalization_llm_used: bool = False
+    levelup_relocalization_llm_confidence: float = 0.0
+    exploitation_noop_blacklist_hits: int = 0
+    mechanism_detector_triggered: str = ""
 
 
 @dataclass(slots=True)
@@ -1969,6 +1978,17 @@ class TraceMemory:
         self.transferred_winning_coords: tuple[int, int] | None = None
         self.post_breakthrough_aborted_reason: str = ""
         self.post_breakthrough_bias_used: bool = False
+        self.regrounded_winning_coords: tuple[int, int] | None = None
+        self.regrounding_delta: tuple[int, int] | None = None
+        self.regrounding_confidence: float = 0.0
+        self.regrounding_used: bool = False
+        self.regrounding_failed_reason: str = ""
+        self.levelup_relocalization_llm_used: bool = False
+        self.levelup_relocalization_llm_confidence: float = 0.0
+        self.exploitation_noop_blacklist: set[tuple[str, int, int]] = set()
+        self.exploitation_noop_neighborhood_blacklist: set[tuple[int, int]] = set()
+        self.exploitation_noop_blacklist_hits: int = 0
+        self.mechanism_detector_triggered: str = ""
 
     def reset_level(self) -> None:
         self.transitions.clear()
@@ -6109,6 +6129,48 @@ class MetacognitiveController:
             return None
         return self.programs.predict_grid(scene.grid, spec, scene)
 
+    def _reground_winning_target(self, scene: Scene) -> tuple[tuple[int, int] | None, tuple[int, int] | None, float, str]:
+        if not self.memory.last_winning_coords or not self.memory.post_breakthrough_window_active:
+            return None, None, 0.0, "no_winning_coords_or_inactive_window"
+        
+        w_x, w_y = self.memory.last_winning_coords
+        components = scene.components
+        if not components:
+            return None, None, 0.0, "no_components_in_scene"
+
+        best_comp = None
+        best_score = 0.0
+        best_delta = (0, 0)
+
+        for comp in components:
+            c_x, c_y = int(round(comp.centroid[0])), int(round(comp.centroid[1]))
+            # Distance from old coords
+            dist = max(abs(c_x - w_x), abs(c_y - w_y))
+            # Shape & Aspect ratio match
+            bbox_w = comp.bbox[2] - comp.bbox[0] + 1
+            bbox_h = comp.bbox[3] - comp.bbox[1] + 1
+            aspect = bbox_w / max(1, bbox_h)
+            
+            score = 0.5
+            if dist <= 4:
+                score += 0.3
+            elif dist <= 8:
+                score += 0.15
+            if comp.area <= 12:
+                score += 0.2
+            
+            if score > best_score:
+                best_score = score
+                best_comp = comp
+                best_delta = (c_x - w_x, c_y - w_y)
+
+        if best_comp is not None and best_score >= 0.60:
+            c_x, c_y = int(round(best_comp.centroid[0])), int(round(best_comp.centroid[1]))
+            regrounded = (max(0, min(scene.width - 1, c_x)), max(0, min(scene.height - 1, c_y)))
+            return regrounded, best_delta, round(best_score, 2), "component_matched"
+
+        return None, None, round(best_score, 2), "low_component_similarity"
+
     def _update_post_breakthrough_window(self, step: int = 0) -> None:
         if not self.memory.post_breakthrough_window_active:
             return
@@ -6151,13 +6213,22 @@ class MetacognitiveController:
             self.memory.recommended_probe_ttl = 0
         
         # Positive and negative evidence accumulation across recent transitions
+        detector_triggered = ""
         recent = list(self.memory.transitions)[-10:]
         for t in recent:
             moves = getattr(t.event, "entity_moves", ())
-            if len(moves) == 1:
+            
+            # Direct Detector 1: drag_or_push
+            if len(moves) >= 1 and t.action.name == "ACTION6":
+                self.memory.mechanism_scores["drag_or_push"] = min(1.0, self.memory.mechanism_scores["drag_or_push"] + 0.25)
+                self.memory.mechanism_scores["targeted_recolor"] = max(0.02, self.memory.mechanism_scores["targeted_recolor"] - 0.05)
+                detector_triggered = "drag_or_push"
+            elif len(moves) == 1:
                 self.memory.mechanism_scores["movement_control"] = min(1.0, self.memory.mechanism_scores["movement_control"] + 0.15)
             elif len(moves) > 1:
-                self.memory.mechanism_scores["gravity_or_fall"] = min(1.0, self.memory.mechanism_scores["gravity_or_fall"] + 0.2)
+                # Direct Detector 2: gravity_or_fall
+                self.memory.mechanism_scores["gravity_or_fall"] = min(1.0, self.memory.mechanism_scores["gravity_or_fall"] + 0.25)
+                detector_triggered = "gravity_or_fall"
             else:
                 # Negative evidence against movement/gravity when transitions produce 0 movement
                 self.memory.mechanism_scores["movement_control"] = max(0.02, self.memory.mechanism_scores["movement_control"] - 0.04)
@@ -6167,20 +6238,25 @@ class MetacognitiveController:
                 self.memory.mechanism_scores["topology_switch"] = min(1.0, self.memory.mechanism_scores["topology_switch"] + 0.2)
                 self.memory.mechanism_scores["line_or_beam"] = min(1.0, self.memory.mechanism_scores["line_or_beam"] + 0.15)
             
-            if t.event.changed_count > 0 and len(moves) == 0:
-                if t.event.changed_count <= 4:
-                    self.memory.mechanism_scores["targeted_recolor"] = min(1.0, self.memory.mechanism_scores["targeted_recolor"] + 0.15)
-                else:
-                    self.memory.mechanism_scores["flood_or_fill"] = min(1.0, self.memory.mechanism_scores["flood_or_fill"] + 0.2)
+            # Direct Detector 3: flood_or_fill
+            if t.event.changed_count >= 8 and len(moves) == 0:
+                self.memory.mechanism_scores["flood_or_fill"] = min(1.0, self.memory.mechanism_scores["flood_or_fill"] + 0.30)
+                detector_triggered = "flood_or_fill"
+            elif t.event.changed_count > 0 and len(moves) == 0:
+                self.memory.mechanism_scores["targeted_recolor"] = min(1.0, self.memory.mechanism_scores["targeted_recolor"] + 0.15)
             elif t.event.changed_count == 0:
                 # Negative evidence against recolor/flood when no pixels changed
                 self.memory.mechanism_scores["targeted_recolor"] = max(0.02, self.memory.mechanism_scores["targeted_recolor"] - 0.03)
                 self.memory.mechanism_scores["flood_or_fill"] = max(0.02, self.memory.mechanism_scores["flood_or_fill"] - 0.03)
 
-            if t.event.disappeared_colors:
-                self.memory.mechanism_scores["component_delete"] = min(1.0, self.memory.mechanism_scores["component_delete"] + 0.2)
+            # Direct Detector 4: component_delete
+            if t.event.disappeared_colors or (t.event.changed_count > 0 and len(t.event.appeared_colors) == 0 and len(moves) == 0):
+                self.memory.mechanism_scores["component_delete"] = min(1.0, self.memory.mechanism_scores["component_delete"] + 0.25)
+                detector_triggered = "component_delete"
             elif t.event.changed_count > 0 and not t.event.disappeared_colors:
                 self.memory.mechanism_scores["component_delete"] = max(0.02, self.memory.mechanism_scores["component_delete"] - 0.04)
+
+        self.memory.mechanism_detector_triggered = detector_triggered
                 
         # Normalize and compute top belief
         total = sum(self.memory.mechanism_scores.values()) or 1.0
@@ -6699,6 +6775,32 @@ class MetacognitiveController:
         # Scored mechanism belief update & mode setting
         self._update_mechanism_beliefs(step=step)
         self._update_post_breakthrough_window(step=step)
+
+        # 0a) Component Re-Grounding on Level Transition
+        if self.memory.post_breakthrough_window_active and self.memory.level_steps <= 1 and self.memory.regrounded_winning_coords is None:
+            regrounded, r_delta, r_conf, r_reason = self._reground_winning_target(scene)
+            self.memory.regrounded_winning_coords = regrounded
+            self.memory.regrounding_delta = r_delta
+            self.memory.regrounding_confidence = r_conf
+            self.memory.regrounding_used = bool(regrounded is not None)
+            self.memory.regrounding_failed_reason = r_reason
+            if regrounded is not None:
+                self.memory.transferred_winning_coords = regrounded
+
+            # 0b) Bounded LLM Relocalization if component re-grounding is ambiguous
+            if (regrounded is None or r_conf < 0.60) and profile.use_model and remaining_sec is not None and remaining_sec > 90.0 and not _OLLAMA_LOCK.locked():
+                win_pattern = {
+                    "action": self.memory.transferred_winning_action_name,
+                    "coords": self.memory.last_winning_coords,
+                    "family": self.memory.transferred_winning_family,
+                }
+                reloc = self.reasoner.propose_relocalization(scene, win_pattern)
+                if reloc is not None and reloc.get("confidence", 0.0) >= 0.50:
+                    self.memory.regrounded_winning_coords = (reloc["x"], reloc["y"])
+                    self.memory.transferred_winning_coords = (reloc["x"], reloc["y"])
+                    self.memory.levelup_relocalization_llm_used = True
+                    self.memory.levelup_relocalization_llm_confidence = reloc["confidence"]
+                    self.memory.regrounding_used = True
 
         # 2a-0) Instant Reflex Fast-Path (Sub-millisecond execution for forced/unambiguous winning moves)
         active_goals = self.goals.active(limit=2)
@@ -7677,6 +7779,13 @@ class MyAgent(Agent):
         profile = _runtime_profile(pending_tier, self.config)
         self.memory.record(transition, self.pending_was_probe)
         self.dead.record(self.pending_signature, event)
+        
+        # Zero-tolerance NO-OP coordinate blacklisting in exploitation mode
+        if (self.memory.mode == "exploitation_mode" or self.memory.post_breakthrough_window_active) and event.no_op and self.pending_action:
+            p_data = self.pending_action.data_dict
+            if "x" in p_data and "y" in p_data:
+                self.memory.exploitation_noop_blacklist.add((self.pending_action.name, p_data["x"], p_data["y"]))
+                self.memory.exploitation_noop_neighborhood_blacklist.add((p_data["x"], p_data["y"]))
         # LLM Family Payoff & Follow-Through Window Update
         if self.pending_reasoning.get("final_action_from_llm"):
             fam = self.pending_reasoning.get("llm_family") or self.memory.llm_recent_committed_family or "unspecified"
@@ -7897,6 +8006,15 @@ class MyAgent(Agent):
             transferred_winning_coords=self.memory.transferred_winning_coords,
             post_breakthrough_aborted_reason=str(self.memory.post_breakthrough_aborted_reason),
             post_breakthrough_bias_used=bool(self.pending_reasoning.get("post_breakthrough_bias_used", self.memory.post_breakthrough_bias_used)),
+            regrounded_winning_coords=self.memory.regrounded_winning_coords,
+            regrounding_delta=self.memory.regrounding_delta,
+            regrounding_confidence=float(self.memory.regrounding_confidence),
+            regrounding_used=bool(self.memory.regrounding_used),
+            regrounding_failed_reason=str(self.memory.regrounding_failed_reason),
+            levelup_relocalization_llm_used=bool(self.memory.levelup_relocalization_llm_used),
+            levelup_relocalization_llm_confidence=float(self.memory.levelup_relocalization_llm_confidence),
+            exploitation_noop_blacklist_hits=int(self.memory.exploitation_noop_blacklist_hits),
+            mechanism_detector_triggered=str(self.memory.mechanism_detector_triggered),
             llm_top_productive_family=max(self.controller.memory.llm_family_payoff.items(), key=lambda x: x[1].get("changed", 0))[0] if self.controller.memory.llm_family_payoff else "",
             llm_top_unproductive_family=max(self.controller.memory.llm_family_payoff.items(), key=lambda x: (x[1].get("noop", 0) + x[1].get("death", 0)))[0] if self.controller.memory.llm_family_payoff else "",
             llm_family_payoff_summary={
