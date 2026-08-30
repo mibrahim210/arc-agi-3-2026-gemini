@@ -6277,7 +6277,7 @@ class MetacognitiveController:
         reasons: list[str] = []
         
         # Hard exclusions: severe stagnation with no progress, or excessive deaths
-        if self.memory.no_op_streak >= 12 and self.memory.progress_events_this_level == 0:
+        if self.memory.no_op_streak >= 12 and self.progress_events_this_level == 0:
             return False, []
         if self.memory.recent_death_count(10) >= 3:
             return False, []
