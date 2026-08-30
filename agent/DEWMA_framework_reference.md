@@ -2,480 +2,459 @@
 
 ## Purpose
 
-This file is the single source of truth for the current **DEWMA** framework as implemented in [`agent/my_agent.py`](C:/Users/mdibr/Desktop/Work_Space_Professional/Kaggle%20Competition/arc-arg-3/GeminiModule/ARC-AGI-3-Kaggle-Starter/agent/my_agent.py).
+This file is the single source of truth for the current **DEWMA** framework as implemented in [my_agent.py](/C:/Users/mdibr/Desktop/Work_Space_Professional/Kaggle%20Competition/arc-arg-3/GeminiModule/ARC-AGI-3-Kaggle-Starter/agent/my_agent.py).
 
-It replaces the need to keep multiple theory notes in sync. When `my_agent.py` changes meaningfully, update this file so the conceptual framework, runtime behavior, and implementation details stay aligned.
-
----
+It should be updated whenever the implementation changes meaningfully so the theory, runtime behavior, and trace interpretation stay aligned.
 
 ## 1. What DEWMA Means Here
 
 **DEWMA** stands for **Developmental Epistemic World-Model Agent**.
 
-The current agent is a game-agnostic interactive reasoning system for ARC-AGI-3 that:
+In this codebase, DEWMA is a generic ARC-AGI-3 interactive agent that:
 
-- learns during test-time interaction rather than relying on per-game hardcoding
-- treats the raw grid as ground truth
-- builds and revises internal causal models from action outcomes
-- uses explicit hypothesis competition rather than single-rule commitment
-- shifts between exploration and exploitation based on confidence and runtime budget
-- degrades gracefully under strict Kaggle runtime constraints
+- treats the raw grid as authoritative
+- learns from test-time interaction rather than game-id branching
+- maintains competing goals, mechanism beliefs, and executable programs
+- switches between exploration and exploitation based on evidence
+- uses bounded deterministic planning first and optional LLM abduction second
+- is hardened for Kaggle runtime, concurrency, and trace forensics
 
-This is **not** a memorized public-game solver. It is a structured reasoning scaffold with strong hand-designed inductive priors over geometry, causality, controllability, symmetry, replay, and local transformations.
-
----
+This is still a **generic solver with strong priors**, not a memorized public-task lookup system.
 
 ## 2. Core Design Principles
 
 ### 2.1 Raw Grid Authority
 
-The 2D integer grid is always authoritative. Derived abstractions such as components, entities, goals, and induced programs are confidence-weighted helpers. They are never allowed to silently override raw-grid evidence.
+The current grid is the final source of truth. Entities, components, goals, and induced programs are helper abstractions that can be revised whenever the raw transition evidence disagrees.
 
 ### 2.2 Developmental Learning
 
-The agent begins without game-specific rules. It incrementally learns from transitions:
+The agent starts each game without puzzle-specific rules and gradually learns:
 
-- which actions are no-ops
+- which actions no-op
 - which actions are dangerous
-- which local patterns predict effects
-- which goals correlate with level progress
-- which induced programs replay correctly
+- which regions are repeatedly unproductive
+- which goal families correlate with progress
+- which program families replay consistently
+- which mechanism families fit observed transitions
 
-### 2.3 Epistemic Action Selection
+### 2.3 Mechanism-First Reasoning
 
-When the environment is uncertain, the agent prefers actions that increase information:
+The agent now explicitly tracks soft beliefs over mechanism families such as:
 
-- untried signatures
-- frontier exploration
-- discriminating probes
-- safe probing around recent changes
+- `movement_control`
+- `targeted_recolor`
+- `component_delete`
+- `drag_or_push`
+- `line_or_beam`
+- `flood_or_fill`
+- `gravity_or_fall`
+- `copy_or_stamp`
+- `count_or_trigger`
+- `topology_switch`
 
-When confidence grows, the agent shifts toward:
+These beliefs are updated from both deterministic transition evidence and LLM abduction hints, with positive and negative evidence, TTL-based decay, and per-step shift telemetry.
 
-- replayed progress
-- verified program execution
-- bounded counterfactual planning
-- deterministic navigation
+### 2.4 World Models Over Single Heuristics
 
-### 2.4 Internal World Models
+The policy is composed from several interacting predictive layers:
 
-The agent uses multiple internal predictive layers rather than one monolithic model:
-
-- exact replay graph
+- replay graph
+- causal world model
 - spatial action hash
 - hypothesis memory
-- executable induced programs
-- goal alignment verification
-- bounded counterfactual planning
+- executable program library
+- goal alignment verifier
+- bounded counterfactual search
+- promising-state deep search
 
 ### 2.5 Runtime-Adaptive Cognition
 
-The agent is designed for long offline Kaggle runs under wall-clock pressure. It dynamically changes reasoning depth by runtime tier and by explicit local reasoner safety gates.
-
----
+The agent uses runtime tiers and local safety gates so more expensive cognition is only used when it is likely to pay off and still fits the remaining budget.
 
 ## 3. End-to-End Decision Lifecycle
 
-For each settled environment update, the effective pipeline is:
+For each settled frame update, the effective lifecycle is:
 
-1. Perceive the grid and temporal sequence.
-2. Build a `Scene` representation.
-3. Compare pre/post action states and extract an `Event`.
-4. Update memory, hypotheses, goals, programs, alignment, and diagnostics.
-5. Generate candidate actions.
-6. Predict outcomes using replay, induced programs, or heuristics.
-7. Verify alignment and safety.
-8. Choose the best safe action under the metacognitive ladder.
-9. Execute and observe the next transition.
-
----
+1. perceive the latest grid sequence and build a `Scene`
+2. compare pre/post states and derive an `Event`
+3. update memory, goals, programs, mechanism beliefs, and diagnostics
+4. generate candidate actions
+5. predict candidate outcomes using replay, programs, or heuristics
+6. verify safety and alignment
+7. choose the best admissible action from the metacognitive ladder
+8. execute and observe the next transition
 
 ## 4. Major Implementation Components
 
 ### 4.1 Perception and Representation
 
-The perception stack extracts:
+The perception system extracts:
 
-- background color
-- palette statistics
+- background and palette statistics
 - connected components
-- bounding boxes
-- centroids
+- bounding boxes and centroids
 - border contact
-- temporal diffs
+- temporal diffs and animation traces
 - field-vs-object mode
 
-The system distinguishes between:
+The agent distinguishes between:
 
-- **object-like scenes**, where connected entities and controllability matter
-- **field-like scenes**, where raw spatial probing is safer than brittle object assumptions
+- **object-like scenes**, where controllability and entity motion matter
+- **field-like scenes**, where dense-grid probing and raw-state reasoning matter more
 
-### 4.2 Temporal Entity Tracking
+### 4.2 Trace Memory
 
-Tracked entities are used to infer:
+`TraceMemory` stores episodic transition history and now tracks:
 
-- persistence
-- motion
-- controllability
-- likely affordances
-- possible player-like groups
-
-This is a strong inductive bias, but it is not game-specific branching.
-
-### 4.3 Trace Memory
-
-`TraceMemory` stores episodic transitions and supports:
-
-- replay of known effects
-- probe counting
-- loop detection
+- visits and replay opportunities
 - no-op streaks
-- recent-state recurrence checks
-- same-family streak detection
-- action-family entropy estimation
-- longest action-family streak measurement
-- spatial visit counting for coordinate-based probing
+- same-family streaks
+- recent state loops
+- spatial visits by coordinate and action
+- LLM family payoff summaries
+- mechanism beliefs and shift events
+- winning pattern transfer state
+- post-breakthrough exploitation windows
 
-### 4.4 Causal / Hypothesis Memory
+### 4.3 Goal Hypothesis Manager
 
-`HypothesisMemory` stores contextual action signatures and observed outcomes such as:
+Goals are explicit, competing, and revisable. The manager maintains:
 
-- progress
-- no-op
-- death
-- effect hash
+- goal confidence and contradictions
+- progress estimates
+- puzzle-family priors
+- cross-level transfer priors
+- stabilization diagnostics
 
-These signatures are used to estimate:
+Tracked convergence-style diagnostics include:
 
-- hypothesis confidence
-- expected information gain
-- known no-op risk
-- goal bonus
+- `transitions_until_stabilized`
+- `top_goal_changes_this_level`
+- `prior_adjustments_this_level`
+- `puzzle_family_switch_counter`
+- `stabilized_before_progress`
+- `churn_score`
 
-### 4.5 Fast Spatial Action Hash
+### 4.4 Executable Program Library
 
-This is a local transformation cache over small patches. It captures recurring mechanics like:
-
-- local flips
-- local recolors
-- repeated click effects
-
-It supports fast approximate prediction without full global reasoning.
-
-### 4.6 Goal Hypothesis Manager
-
-Goals are explicit, competing, and revisable.
-
-Examples of goal families include:
-
-- collect a color
-- touch or reach a target color
-- move a controllable entity toward a target
-- reduce obstacles
-- preserve valuable structures
-- trigger topology change
-
-Goals are strengthened or weakened from actual transition evidence and level progress.
-
-The goal layer also tracks convergence-oriented diagnostics such as:
-
-- top-goal identity changes within a level
-- transitions until the top goal stabilizes
-- whether stabilization occurred before progress
-- puzzle-family switch count
-- prior-adjustment count from abductive hints
-
-### 4.7 Executable Program Library
-
-The current world-model program layer induces, verifies, and reuses explicit transformation programs.
-
-Supported program families currently include:
+The current program layer can induce, simulate, verify, and replay program families including:
 
 - `exact_replay`
+- `local_patch_replace`
 - `translation`
-- `color_map`
-- `component_delete`
-- `component_recolor`
 - `rot90`
 - `flip_h`
 - `flip_v`
+- `color_map`
+- `component_delete`
+- `component_recolor`
+- `conditional_recolor`
+- `cellular_rule`
 - `line_connect`
 - `drag_component`
 - `gravity`
 - `flood_fill`
 - `copy_pattern`
-- `conditional_recolor`
 - `count_and_fill`
 
-Programs are only trusted for generalized planning once they accumulate sufficient replay support and verification quality.
+Programs remain provisional until they accumulate replay support and verification quality.
 
-### 4.8 Goal Alignment Verifier
+### 4.5 Goal Alignment Verifier
 
-Every potentially executed action is filtered through an alignment and safety gate.
+Every candidate action is filtered through legality and safety checks. The verifier can reject or heavily penalize:
 
-It rejects or penalizes actions associated with:
-
-- illegal or incomplete actions
+- illegal actions
+- incomplete coordinates
 - out-of-bounds coordinates
-- destructive change without justification
-- predicted fatal loss
-- repeated no-op-like behavior
-- violation of learned progress invariants
+- coordinate fatigue
+- persistent deterministic no-ops
+- semantic mismatches
+- high-death contexts
+- dead signatures
 
-### 4.9 Path Planner and Passability Model
+This layer is still the final guardrail over all deterministic and LLM-backed proposals.
+
+### 4.6 Path Planner and Control Inference
 
 The deterministic navigation layer uses:
 
-- learned passability
-- candidate target entities
-- bounded search over passable regions
-- path cooldowns and cycle detection
+- learned passability when enabled
+- action dynamics summaries
+- control inference
+- bounded path search
+- target cooldowns and cycle control
 
-This is a fallback and bridge layer between raw probing and abstract planning.
+This bridges low-level probing and higher-level planning.
 
-### 4.10 Counterfactual Planner
+### 4.7 Counterfactual Planning
 
-The bounded counterfactual planner uses replay-verified induced programs to simulate a short beam of future possibilities and select an action that improves predicted goal alignment.
+The bounded counterfactual planner searches short verified futures using executable programs and goal alignment. It remains a core deterministic planner and is used before generic fallback.
 
-It is explicitly bounded in:
+### 4.8 Optional Local Reasoner
 
-- depth
-- beam size
-- candidate count
+The LLM layer acts primarily as a **bounded abductive assistant**, not as a free-running policy.
 
-and it is throttled when looping behavior appears.
+Current behavior:
 
-### 4.11 Optional Local Reasoner
+- prefers local Ollama when available
+- falls back to local `llama_cpp` when possible
+- otherwise disables itself and preserves deterministic behavior
 
-The local text reasoner acts as an **abductive hypothesis generator**, producing structural program priors, action candidates, and puzzle-family classifications from observed transitions rather than serving as an unconstrained direct policy.
-
-Current backend strategy:
-
-- prefer **Ollama** when available
-- fall back to **llama_cpp** with local GGUF weights
-- otherwise disable the model and continue with deterministic logic
-
-Current default offline model path points to a **Qwen 2.5 Coder 7B GGUF** dataset path, while `llama_cpp` remains a fallback backend.
-
-The reasoner has access to a constrained tool interface:
+The reasoner can use a constrained tool interface:
 
 - `inspect`
 - `python`
 
-through a safe REPL-like interface over grid summaries and recent transitions.
+It is asked to emit structured JSON with fields such as:
 
-Its proposals are still subject to:
+- `mechanism_family`
+- `mechanism_confidence`
+- `priority_program_families`
+- `invariants_to_preserve`
+- `recommended_probe_type`
+- `suggested_programs`
 
-- parsing checks
-- legality checks
-- coordinate checks
-- program ingestion and verification
-- dead-signature filtering
-- probe-budget filtering
-- alignment verification
+All model outputs are still filtered by legality, semantic gating, alignment, dead-signature checks, probe budgets, and cooldown/backoff rules.
 
-### 4.12 Puzzle-Family Classification and Goal Priors
+### 4.9 Puzzle-Family Classification
 
-The agent includes a deterministic soft `classify_puzzle_family()` pass over grid density, color diversity, and connected-component structure to initialize high-level priors such as:
+The code still includes a deterministic `classify_puzzle_family()` helper that initializes soft priors such as:
 
 - `pathfinding`
 - `color_matching`
 - `field_diffusion`
 - `geometric_transformation`
 
-These priors are then updated by LLM abductive proposals through `GoalHypothesisManager.adjust_priors()`, which boosts compatible goal families without hard-routing into game-specific logic.
+These remain soft priors rather than hard routes.
 
-### 4.13 Boredom and Anti-Collapse
+### 4.10 Promising-State Deep Search
 
-To prevent action-family collapse, `MetacognitiveController` monitors `same_family_streak`.
+The current implementation now includes a dedicated **promising-state deep search** layer.
 
-When the streak exceeds a threshold, it triggers a **Forced Structural Probe** that:
+It activates only when the controller sees strong signals such as:
 
-- filters out the current dominant action family
-- scores candidates by underexplored action usage
-- prefers less-visited coordinate regions through `TraceMemory.spatial_visits`
-- gives extra exploratory preference to novel `ACTION6` interactions when legal
+- prior level progress
+- active post-breakthrough window
+- high mechanism confidence
+- active follow-through
+- live priority program families
+- repeated productive transitions
 
-This is intended to broaden exploration without breaking the alignment gate.
+It is runtime-tier bounded and searches more deeply only on promising states, not globally on every step.
 
-### 4.14 Convergence and Trace Diagnostics
+### 4.11 Post-Breakthrough Level Exploitation
 
-Telemetry logs capture rich, Kaggle-safe metrics including:
+The current code now records a compact winning pattern whenever a step causes `level_delta > 0` or `win`, including:
 
-- action-family metrics:
-  - `action_family_entropy`
-  - `longest_family_streak`
-  - `same_family_streak`
-- convergence metrics:
-  - `transitions_until_stabilized`
-  - `top_goal_changes_this_level`
-  - `prior_adjustments_this_level`
-  - `stabilized_before_progress`
-  - `puzzle_family_switch_counter`
-  - `churn_score`
-- LLM impact metrics:
-  - `llm_abductions_parsed`
-  - `llm_abductions_selected`
-  - `llm_action_progress`
-  - `llm_program_progress`
-  - `llm_abduction_prior_shift_progress`
-- counterfactual metrics:
-  - `counterfactual_streak`
+- action name
+- program kind when available
+- top mechanism family
+- top mechanism confidence
+- coordinates when applicable
+- source of the winning action
+- step number within the level
 
----
+On the next level transition, this can activate a **post-breakthrough exploitation window** that:
 
-## 5. Runtime Tiers
+- seeds a transferred winning family/program prior
+- biases ranking toward semantically similar actions
+- extends exploitation more strongly after early breakthroughs
+- can abort early on contradiction
 
-The implementation uses runtime tiers:
+This is a temporary high-confidence exploitation overlay, not a permanent lock-in.
 
-- `A9`: full reasoning stack
-- `A8`: reduced but still hypothesis-rich reasoning
-- `A7`: simpler, more budget-conscious reasoning
-- `A5`: aggressive fallback / survival mode
+## 5. Current Decision Ladder
 
-Tier selection depends on remaining time and projected budget pressure.
+The effective metacognitive order in the current implementation is:
 
-This runtime control is part of DEWMA, not just an engineering afterthought.
+1. exact replay progress / replay graph plan
+2. verified queued plan continuation
+3. instant reflex fast-path for very strong goal alignment
+4. bounded macro replay for productive recent programs
+5. LLM follow-through continuation window
+6. evidence-guided novelty exploration when strongly stuck
+7. forced structural probe on family-collapse boredom
+8. bounded counterfactual planning
+9. deterministic path planning
+10. replay/hash/hypothesis arbitration
+11. promising-state bounded deep search
+12. milestone-gated local reasoner
+13. physical discriminating probes
+14. alignment-constrained fallback
+15. fail-closed reset / legal fallback
 
----
+This ladder is intentionally biased toward cheap verified behavior first, then bounded planning, then model assistance, then safe fallback.
 
-## 6. Current Decision Ladder
+## 6. Runtime Tiers
 
-The metacognitive controller currently follows this high-level priority order:
+The runtime tiers remain:
 
-1. exact replay progress or replay graph plan
-2. verified multi-step plan queue
-3. forced structural probe during action-family collapse
-4. bounded counterfactual planning with verified programs
-5. deterministic path planning
-6. replay/hash/hypothesis arbitration
-7. milestone-gated local reasoner
-8. physical information-seeking probes
-9. alignment-constrained fallback
+- `A9`: richest reasoning stack
+- `A8`: reduced but still planning-heavy
+- `A7`: budget-conscious reasoning
+- `A5`: aggressive survival / fallback mode
 
-This order is important: cheap, safe, and verified mechanisms outrank expensive speculative ones.
-
----
+The deep-search layer is also tier-bounded. It only runs where the tier and remaining time justify the cost.
 
 ## 7. Runtime Safety and LLM Budgeting
 
-The current DEWMA implementation includes explicit local-reasoner safety controls:
+The implementation includes explicit safety controls around model use:
 
 - decision-level model budget
-- per-level model budget
-- per-decision max rounds
-- per-decision max wall-clock time
-- minimum remaining runtime threshold before model use
-- short Ollama lock timeout to avoid parallel thread stalls
-- deterministic fallback when the model is unavailable or unsafe to call
+- per-level consultation budget
+- per-decision tool-round limits
+- projected-latency skip gates
+- minimum remaining-time gates
+- warmup staggering
+- lock backoff for parallel contention
+- cooldown gates
+- repeated-failure backoff
+- deterministic fallback when unavailable or unsafe
 
-This is an implementation of **runtime-aware cognition**, which is a core DEWMA behavior under Kaggle constraints.
+This is part of the architecture, not just infrastructure hardening.
 
----
+## 8. Anti-Churn and Exploitation Control
 
-## 8. Logging and Diagnostics
+The current code contains several anti-collapse layers:
 
-Two major diagnostic channels exist:
+- coordinate fatigue rejection
+- persistent no-op hard gating
+- same-family boredom probes
+- fallback loop tracking
+- counterfactual fallback tracking
+- semantic gating for mismatched action families
+- post-breakthrough contradiction aborts
+- caps on post-breakthrough `stuck_mode_exploration`
+- caps on post-breakthrough alignment fallback churn
 
-### 8.1 Main Action Traces
+This is especially important because many ARC-AGI-3 failures are not instant mistakes but long low-value loops.
 
-Written under:
+## 9. Logging and Diagnostics
 
-- local: `traces/trace_*.jsonl`
+### 9.1 Main Action Traces
 
-These capture:
+The main traces are written to `DEWMA_TRACE_DIR` (default `./traces`) using names like:
 
-- state/action transitions
-- no-op and death signals
-- progress markers
-- decision stages
-- representation confidence
+- `trace_<game_id>_<timestamp>_<flush_index>.jsonl`
+
+These traces now include:
+
+- transition and action records
+- decision stage and final action source
 - runtime tier
-- convergence counters
-- LLM contribution counters
+- goal and mechanism telemetry
+- LLM consultation and rejection counters
+- macro replay telemetry
+- deep-search telemetry
+- post-breakthrough exploitation telemetry
+- per-family payoff summaries
 
-### 8.2 LLM Forensics
+Important fields in the current implementation include:
 
-Written under:
+- `mode`
+- `top_mechanism_family`
+- `top_mechanism_confidence`
+- `competing_mechanism_families`
+- `mechanism_family_scores`
+- `priority_program_families`
+- `invariants_to_preserve`
+- `mechanism_shift_event`
+- `mechanism_aligned_action`
+- `mechanism_discriminating_probe_used`
+- `promising_state_detected`
+- `promising_state_reasons`
+- `deep_search_used`
+- `deep_search_depth`
+- `deep_search_width`
+- `deep_search_nodes_evaluated`
+- `deep_search_best_score`
+- `deep_search_time_ms`
+- `deep_search_selected_family`
+- `deep_search_aborted_reason`
+- `post_breakthrough_window_active`
+- `post_levelup_exploit_steps_remaining`
+- `transferred_winning_family`
+- `transferred_winning_program_kind`
+- `transferred_winning_action_name`
+- `transferred_winning_coords`
+- `post_breakthrough_aborted_reason`
+- `post_breakthrough_bias_used`
 
-- local: `traces/llm_forensics/<run_id>.jsonl`
-- Kaggle rerun: `/kaggle/working/llm_forensics/<run_id>.jsonl`
+### 9.2 LLM Forensics
 
-These capture:
+LLM forensic logs are written under the same trace directory using names like:
 
-- raw model responses
-- parsed response type
-- tool usage
-- proposal program kinds and params
-- verification scores
+- `llm_forensics_<game_id>.jsonl`
+
+They capture:
+
+- prompt/response pairs
+- response type
+- structured proposal contents
+- parse outcomes
 - rejection reasons
-- skip reasons like low remaining time or lock unavailability
+- model-side failures
 
-Kaggle forensic logs are intentionally append-only and must not be deleted during a run.
+These logs are intended to remain append-only during Kaggle runs.
 
----
-
-## 9. What Is Truly General vs What Is Biased
+## 10. What Is Truly General vs What Is Biased
 
 ### General
 
-- no game-ID branching
-- no public-game solution lookup
-- causal learning from transitions
-- explicit hypothesis competition
-- replay-first reasoning
-- bounded planning with verification
-- runtime-adaptive control
+- no game-id branching
+- no public-task answer lookup
+- learning from transitions
+- explicit goal competition
+- explicit mechanism competition
+- verification before execution
+- bounded planning instead of memorized scripts
 
 ### Biased but Still Framework-Consistent
 
-- entity-centric controllability assumptions
-- geometric coordinate priors
-- a bounded transformation vocabulary
-- path planning assumptions
-- alignment and preservation heuristics
+- entity/control priors
+- geometric and spatial priors
+- finite program vocabulary
+- action-economy heuristics
+- mechanism-family scoring rules
+- transferred winning-pattern exploitation
 
-So the current system is best described as:
+So the best description of the current code is:
 
-**a game-agnostic reasoning framework with strong abstract priors**, not a universal unbiased solver.
+**a generic interactive reasoning framework with strong structured priors and bounded post-breakthrough exploitation.**
 
----
+## 11. Current Strengths
 
-## 10. Current Strengths
+- strong anti-memorization posture
+- explicit developmental learning loop
+- multiple interacting world-model layers
+- mechanism-first reasoning is now real, not just prompt language
+- deep search is selective rather than globally expensive
+- Kaggle-safe runtime hardening is strong
+- traces are rich enough for real forensic debugging
+- post-breakthrough exploitation now exists as a first-class policy layer
 
-- Strong anti-memorization posture
-- Explicit developmental learning loop
-- Multiple interacting world-model layers
-- Verified-program planning rather than blind speculation
-- Better anti-collapse probing through spatial visit tracking
-- Good runtime-awareness for Kaggle conditions
-- Separate forensic logging for policy and model behavior
+## 12. Current Weaknesses
 
----
+- the program vocabulary is still limited relative to full ARC novelty
+- mechanism beliefs can still overcommit on hard hidden tasks
+- the agent can still spend many actions in fallback churn
+- LLM proposals remain filtered heavily and may contribute unevenly
+- post-breakthrough bias attribution is still easier to trace than to optimize
+- hidden-game generalization remains the open problem, not notebook plumbing
 
-## 11. Current Weaknesses
+## 13. How To Update This File
 
-- The program vocabulary is still limited relative to the full novelty space of ARC-AGI-3
-- The agent can still overcommit to the wrong abstraction family
-- Action-family collapse is mitigated, not eliminated
-- LLM proposals are often syntactically valid but semantically unverifiable
-- Tool-use by the local reasoner may still be underexploited
+Update this file whenever any of the following change in `agent/my_agent.py`:
 
----
-
-## 12. How To Update This File
-
-When `agent/my_agent.py` changes meaningfully, update this file if any of the following shift:
-
-- supported induced program kinds
-- local reasoner backend
+- supported program families
 - decision ladder ordering
-- runtime tier logic
-- model budget / timeout / skip rules
-- trace or forensic log paths
-- major goal or alignment semantics
-- convergence metrics
-- LLM contribution metrics
-- overall DEWMA philosophical framing
+- mechanism-belief logic
+- local reasoner backend or schema
+- runtime tier behavior
+- deep-search policy
+- post-breakthrough transfer/exploitation behavior
+- trace schema
+- forensic log behavior
 
-If only one documentation file is maintained going forward, maintain this one.
+If only one DEWMA document is maintained, maintain this one.
