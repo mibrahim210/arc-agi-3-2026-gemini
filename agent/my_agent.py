@@ -5670,7 +5670,6 @@ class CandidateGenerator:
         reground_coords = self.memory.regrounded_winning_coords or self.memory.transferred_winning_coords
         if (self.memory.post_breakthrough_window_active or self.memory.current_level_index > 0) and reground_coords is not None:
             tx, ty = reground_coords
-            self.memory.post_breakthrough_local_search_used = True
             for dy in range(-2, 3):
                 for dx in range(-2, 3):
                     nx, ny = tx + dx, ty + dy
@@ -6798,6 +6797,7 @@ class MetacognitiveController:
         self.reasoner_suppression_reason = ""
         self.memory.post_breakthrough_bias_used = False
         self.memory.post_breakthrough_continuation_bias = 0.0
+        self.memory.post_breakthrough_local_search_used = False
         self.llm_step_meta = {
             "reasoner_consulted_this_step": False,
             "reasoner_parsed_abduction_this_step": False,
@@ -6888,9 +6888,13 @@ class MetacognitiveController:
                 reloc = self.reasoner.propose_relocalization(scene, win_pattern)
                 if reloc is None:
                     self.memory.regrounding_failed_reason = "llm_relocalization_no_response"
+                    if self.memory.post_breakthrough_window_active and regrounded is None:
+                        self.memory.post_breakthrough_aborted_reason = "continuation_relocalization_failed"
                 elif reloc.get("confidence", 0.0) < 0.50:
                     self.memory.regrounding_failed_reason = "llm_relocalization_low_confidence"
                     self.memory.levelup_relocalization_llm_confidence = float(reloc.get("confidence", 0.0))
+                    if self.memory.post_breakthrough_window_active and regrounded is None:
+                        self.memory.post_breakthrough_aborted_reason = "continuation_relocalization_failed"
                 else:
                     self.memory.regrounded_winning_coords = (reloc["x"], reloc["y"])
                     self.memory.transferred_winning_coords = (reloc["x"], reloc["y"])
@@ -7024,6 +7028,11 @@ class MetacognitiveController:
                 score, best, decision, prediction, applied_ft_transfer_bias = ft_candidates[0]
                 if applied_ft_transfer_bias:
                     self.memory.post_breakthrough_bias_used = True
+                    self.memory.post_breakthrough_continuation_bias = 1.2
+                    if ft_coords and best.spec.data:
+                        cx, cy = best.spec.data_dict.get("x"), best.spec.data_dict.get("y")
+                        if cx is not None and cy is not None and max(abs(cx - ft_coords[0]), abs(cy - ft_coords[1])) <= 2:
+                            self.memory.post_breakthrough_local_search_used = True
                 spec = ActionSpec(
                     name=best.spec.name, data=best.spec.data, source="llm_follow_through",
                     predicted_effect=best.spec.predicted_effect if prediction is None else prediction.expected_effect,
@@ -7121,17 +7130,17 @@ class MetacognitiveController:
                     
                 exploratory.append((evidence_score + decision.score, candidate, decision))
             if exploratory:
-                # Anti-churn guard during post-breakthrough window
-                if self.memory.post_breakthrough_window_active and self.post_breakthrough_stuck_mode_uses >= 2:
-                    self.memory.post_breakthrough_window_active = False
-                    self.memory.post_breakthrough_aborted_reason = "stuck_mode_cap_exceeded"
-                    self.post_breakthrough_stuck_mode_uses = 0
-                else:
+                # Anti-churn guard: during active continuation window, skip stuck-mode to prefer structured continuation
+                if self.memory.post_breakthrough_window_active:
+                    self.post_breakthrough_stuck_mode_uses += 1
+                    if self.post_breakthrough_stuck_mode_uses >= 2:
+                        self.memory.post_breakthrough_window_active = False
+                        self.memory.post_breakthrough_aborted_reason = "continuation_fallback_forced"
+                        self.post_breakthrough_stuck_mode_uses = 0
+                if not self.memory.post_breakthrough_window_active:
                     exploratory.sort(key=lambda row: row[0], reverse=True)
                     score, best, decision = exploratory[0]
                     self.stuck_mode_activations += 1
-                    if self.memory.post_breakthrough_window_active:
-                        self.post_breakthrough_stuck_mode_uses += 1
                     spec = ActionSpec(
                         name=best.spec.name, data=best.spec.data, source="stuck_mode_exploration",
                         predicted_effect=best.spec.predicted_effect, score=best.spec.score + score,
@@ -7194,6 +7203,8 @@ class MetacognitiveController:
                     elif cf_plan.first_action.name == self.memory.transferred_winning_action_name:
                         self.memory.post_breakthrough_bias_used = True
                         applied_cf_bias = True
+                if applied_cf_bias:
+                    self.memory.post_breakthrough_continuation_bias = 2.0
                 stage_name = "counterfactual_program_search" if profile.use_programs and not self.dead.is_dead("counterfactual_program_search") and self.counterfactual_streak < 15 else "counterfactual_fallback"
                 return cf_plan.first_action, False, {
                     "stage": stage_name,
@@ -7236,12 +7247,14 @@ class MetacognitiveController:
 
         # 5) Replay/hash/hypothesis arbitration remains the A5 safety core.
         ranked: list[tuple[float, Candidate,
-                           AlignmentDecision, ProgramPrediction | None, bool]] = []
+                           AlignmentDecision, ProgramPrediction | None, bool, float, bool]] = []
         for candidate in candidates:
             score, decision, prediction = self._aligned_known_candidate(
                 scene, candidate, legal_names, profile)
             if decision.allowed and not candidate.is_probe:
                 applied_bias = False
+                cand_continuation_bias = 0.0
+                is_local_search = False
                 if prediction is not None:
                     score += self._priority_family_boost(prediction.kind)
                     if prediction.kind == self.memory.top_mechanism_family:
@@ -7251,11 +7264,11 @@ class MetacognitiveController:
                         if prediction.kind == self.memory.transferred_winning_program_kind or prediction.kind == self.memory.transferred_winning_family:
                             score += 2.0
                             applied_bias = True
-                            self.memory.post_breakthrough_continuation_bias += 2.0
+                            cand_continuation_bias += 2.0
                         if candidate.spec.name == self.memory.transferred_winning_action_name:
                             score += 1.5
                             applied_bias = True
-                            self.memory.post_breakthrough_continuation_bias += 1.5
+                            cand_continuation_bias += 1.5
                         if reground_coords and candidate.spec.data:
                             cd = dict(candidate.spec.data)
                             if "x" in cd and "y" in cd:
@@ -7263,13 +7276,17 @@ class MetacognitiveController:
                                 if dist <= 2:
                                     score += 1.8
                                     applied_bias = True
-                                    self.memory.post_breakthrough_continuation_bias += 1.8
-                ranked.append((score, candidate, decision, prediction, applied_bias))
+                                    cand_continuation_bias += 1.8
+                                    is_local_search = True
+                ranked.append((score, candidate, decision, prediction, applied_bias, cand_continuation_bias, is_local_search))
         if ranked:
             ranked.sort(key=lambda row: row[0], reverse=True)
-            score, best, decision, prediction, applied_bias = ranked[0]
+            score, best, decision, prediction, applied_bias, best_cont_bias, best_local_used = ranked[0]
             if applied_bias:
                 self.memory.post_breakthrough_bias_used = True
+                self.memory.post_breakthrough_continuation_bias = best_cont_bias
+            if best_local_used:
+                self.memory.post_breakthrough_local_search_used = True
             spec = ActionSpec(
                 name=best.spec.name, data=best.spec.data, source=best.spec.source,
                 predicted_effect=best.spec.predicted_effect if prediction is None else prediction.expected_effect,
@@ -7667,9 +7684,9 @@ class MetacognitiveController:
         if candidates:
             if self.memory.post_breakthrough_window_active:
                 self.post_breakthrough_fallback_uses += 1
-                if self.post_breakthrough_fallback_uses >= 3:
+                if self.post_breakthrough_fallback_uses >= 2:
                     self.memory.post_breakthrough_window_active = False
-                    self.memory.post_breakthrough_aborted_reason = "fallback_cap_exceeded"
+                    self.memory.post_breakthrough_aborted_reason = "continuation_fallback_forced"
                     self.post_breakthrough_fallback_uses = 0
 
             safest: list[tuple[float, Candidate]] = []
