@@ -6055,6 +6055,8 @@ class MetacognitiveController:
         self.stagnation_override_count_this_level = 0
         self.llm_step_meta: dict[str, Any] = {}
         self.perception = None
+        self.post_breakthrough_stuck_mode_uses = 0
+        self.post_breakthrough_fallback_uses = 0
 
     def reset_level(self) -> None:
         self.plan_queue.clear()
@@ -6604,6 +6606,7 @@ class MetacognitiveController:
         self.last_response_frames = tuple(response_frames)
         self.reasoner_suppressed = False
         self.reasoner_suppression_reason = ""
+        self.memory.post_breakthrough_bias_used = False
         self.llm_step_meta = {
             "reasoner_consulted_this_step": False,
             "reasoner_parsed_abduction_this_step": False,
@@ -6865,15 +6868,23 @@ class MetacognitiveController:
                     
                 exploratory.append((evidence_score + decision.score, candidate, decision))
             if exploratory:
-                exploratory.sort(key=lambda row: row[0], reverse=True)
-                score, best, decision = exploratory[0]
-                self.stuck_mode_activations += 1
-                spec = ActionSpec(
-                    name=best.spec.name, data=best.spec.data, source="stuck_mode_exploration",
-                    predicted_effect=best.spec.predicted_effect, score=best.spec.score + score,
-                    goal_ids=decision.goal_ids,
-                )
-                return spec, True, {"stage": "stuck_mode_exploration", "final_action_source": "stuck_mode_exploration", "score": round(score, 3)}
+                # Anti-churn guard during post-breakthrough window
+                if self.memory.post_breakthrough_window_active and self.post_breakthrough_stuck_mode_uses >= 2:
+                    self.memory.post_breakthrough_window_active = False
+                    self.memory.post_breakthrough_aborted_reason = "stuck_mode_cap_exceeded"
+                    self.post_breakthrough_stuck_mode_uses = 0
+                else:
+                    exploratory.sort(key=lambda row: row[0], reverse=True)
+                    score, best, decision = exploratory[0]
+                    self.stuck_mode_activations += 1
+                    if self.memory.post_breakthrough_window_active:
+                        self.post_breakthrough_stuck_mode_uses += 1
+                    spec = ActionSpec(
+                        name=best.spec.name, data=best.spec.data, source="stuck_mode_exploration",
+                        predicted_effect=best.spec.predicted_effect, score=best.spec.score + score,
+                        goal_ids=decision.goal_ids,
+                    )
+                    return spec, True, {"stage": "stuck_mode_exploration", "final_action_source": "stuck_mode_exploration", "score": round(score, 3)}
             
         # 2b) Forced Structural Probe (Boredom Override)
         if self.memory.same_family_streak >= 10:
@@ -7358,6 +7369,13 @@ class MetacognitiveController:
 
         # 8) Least harmful advertised action, with no invented actions.
         if candidates:
+            if self.memory.post_breakthrough_window_active:
+                self.post_breakthrough_fallback_uses += 1
+                if self.post_breakthrough_fallback_uses >= 3:
+                    self.memory.post_breakthrough_window_active = False
+                    self.memory.post_breakthrough_aborted_reason = "fallback_cap_exceeded"
+                    self.post_breakthrough_fallback_uses = 0
+
             safest: list[tuple[float, Candidate]] = []
             for candidate in candidates:
                 prediction = self._predict(scene, candidate.spec, profile)
@@ -7820,7 +7838,7 @@ class MyAgent(Agent):
             transferred_winning_action_name=str(self.memory.transferred_winning_action_name),
             transferred_winning_coords=self.memory.transferred_winning_coords,
             post_breakthrough_aborted_reason=str(self.memory.post_breakthrough_aborted_reason),
-            post_breakthrough_bias_used=bool(self.memory.post_breakthrough_bias_used),
+            post_breakthrough_bias_used=bool(self.pending_reasoning.get("post_breakthrough_bias_used", self.memory.post_breakthrough_bias_used)),
             llm_top_productive_family=max(self.controller.memory.llm_family_payoff.items(), key=lambda x: x[1].get("changed", 0))[0] if self.controller.memory.llm_family_payoff else "",
             llm_top_unproductive_family=max(self.controller.memory.llm_family_payoff.items(), key=lambda x: (x[1].get("noop", 0) + x[1].get("death", 0)))[0] if self.controller.memory.llm_family_payoff else "",
             llm_family_payoff_summary={
