@@ -8499,11 +8499,15 @@ class MyAgent(Agent):
         else:
             self.memory.coord_cycle_clicks_remaining = max(0, self.memory.coord_cycle_clicks_remaining - 1)
 
-        # 3. Systematic Sequential Component Sweep click decrement
+        # 3. Systematic Sequential Component Sweep click decrement and anti-stall
         if self.memory.active_sweep_clicks_remaining > 0:
-            self.memory.active_sweep_clicks_remaining -= 1
-            if self.memory.active_sweep_clicks_remaining <= 0:
+            if event.no_op or event.changed_count == 0:
+                self.memory.active_sweep_clicks_remaining = 0
                 self.memory.active_sweep_component_id = None
+            else:
+                self.memory.active_sweep_clicks_remaining -= 1
+                if self.memory.active_sweep_clicks_remaining <= 0:
+                    self.memory.active_sweep_component_id = None
 
         # 4. Atomic Two-Phase Drag/Drop Pairing (ACTION6 -> ACTION7) in drag_or_push / movement_control
         if (
