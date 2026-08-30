@@ -8093,16 +8093,22 @@ class MetacognitiveController:
                     self.memory.post_breakthrough_aborted_reason = "continuation_fallback_forced"
                     self.post_breakthrough_fallback_uses = 0
 
-            safest: list[tuple[float, Candidate]] = []
+            allowed_safest: list[tuple[float, Candidate]] = []
+            disallowed_safest: list[tuple[float, Candidate]] = []
             for candidate in candidates:
                 prediction = self._predict(scene, candidate.spec, profile)
                 decision = self._verify(
                     scene, candidate.spec, legal_names, prediction, candidate.is_probe, profile)
-                safest.append(
-                    (candidate.score + decision.score - decision.risk, candidate))
-            safest.sort(key=lambda row: row[0], reverse=True)
+                entry = (candidate.score + decision.score - decision.risk, candidate)
+                if decision.allowed:
+                    allowed_safest.append(entry)
+                else:
+                    disallowed_safest.append(entry)
+            
+            target_list = allowed_safest if allowed_safest else disallowed_safest
+            target_list.sort(key=lambda row: row[0], reverse=True)
             stage_name = "alignment_constrained_fallback" if profile.use_alignment else "deterministic_fallback"
-            return safest[0][1].spec, safest[0][1].is_probe, {
+            return target_list[0][1].spec, target_list[0][1].is_probe, {
                 "stage": stage_name,
                 "final_action_source": "alignment_fallback" if profile.use_alignment else "deterministic_fallback"
             }
