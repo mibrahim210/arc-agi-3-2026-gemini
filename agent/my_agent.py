@@ -661,6 +661,10 @@ class DiagnosticTraceRecord:
     productive_search_convergence_pressure: float = 0.0
     line_beam_closure_bias_used: bool = False
     component_delete_payoff_bias_used: bool = False
+    atomic_drag_drop_paired: bool = False
+    sequential_component_sweep_active: bool = False
+    orthogonal_collision_steer_used: bool = False
+    cell_cycle_persistence_used: bool = False
     regrounded_winning_coords: Any = None
     regrounding_delta: Any = None
     regrounding_confidence: float = 0.0
@@ -2021,6 +2025,15 @@ class TraceMemory:
         self.productive_search_convergence_pressure: float = 0.0
         self.line_beam_closure_bias_used: bool = False
         self.component_delete_payoff_bias_used: bool = False
+        self.atomic_drag_drop_paired: bool = False
+        self.sequential_component_sweep_active: bool = False
+        self.orthogonal_collision_steer_used: bool = False
+        self.cell_cycle_persistence_used: bool = False
+        self.active_sweep_component_id: int | None = None
+        self.active_sweep_clicks_remaining: int = 0
+        self.recommended_orthogonal_turn: str = ""
+        self.last_changed_coord: tuple[int, int] | None = None
+        self.coord_cycle_clicks_remaining: int = 0
         self.family_stagnation_steps: dict[str, int] = {}
         self.regrounded_winning_coords: tuple[int, int] | None = None
         self.regrounding_delta: tuple[int, int] | None = None
@@ -5782,6 +5795,46 @@ class CandidateGenerator:
                         proposals.append((3.0 - 0.12 * self.coordinate_visits[mid], mid, "line_beam_midpoint"))
                         self.memory.line_beam_closure_bias_used = True
 
+        # Multi-Click Cell Cycle Persistence: Allow immediate follow-up clicks if interior cell is in active transition
+        if (
+            self.memory.current_level_index == 0
+            and not self.memory.post_breakthrough_window_active
+            and self.memory.last_changed_coord is not None
+            and self.memory.coord_cycle_clicks_remaining > 0
+        ):
+            cx, cy = self.memory.last_changed_coord
+            if 2 < cx < scene.width - 2 and 2 < cy < scene.height - 2 and scene.grid[cy, cx] != scene.background:
+                proposals.append((2.4 - 0.10 * self.coordinate_visits[(cx, cy)], (cx, cy), "cell_cycle_persistence"))
+                self.memory.cell_cycle_persistence_used = True
+
+        # Systematic Sequential Component Sweep for targeted_recolor (Interior non-border components)
+        if (
+            self.memory.current_level_index == 0
+            and not self.memory.post_breakthrough_window_active
+            and (self.memory.top_mechanism_family == "targeted_recolor" or "targeted_recolor" in self.memory.competing_mechanism_families)
+            and scene.components
+        ):
+            active_comp = None
+            interior_comps = [c for c in scene.components if c.color != scene.background and not c.touches_border and c.centroid[1] > 2.5 and c.centroid[0] > 2.5]
+            if self.memory.active_sweep_component_id is not None:
+                for comp in interior_comps:
+                    if id(comp) == self.memory.active_sweep_component_id:
+                        active_comp = comp
+                        break
+            if active_comp is None and interior_comps:
+                sorted_comps = sorted(interior_comps, key=lambda c: c.area)
+                active_comp = sorted_comps[0]
+                self.memory.active_sweep_component_id = id(active_comp)
+                self.memory.active_sweep_clicks_remaining = min(4, len(active_comp.cells) + 1)
+            
+            if active_comp is not None and self.memory.active_sweep_clicks_remaining > 0:
+                self.memory.sequential_component_sweep_active = True
+                cx, cy = int(round(active_comp.centroid[0])), int(round(active_comp.centroid[1]))
+                if 0 <= cx < scene.width and 0 <= cy < scene.height:
+                    proposals.append((2.2 - 0.10 * self.coordinate_visits[(cx, cy)], (cx, cy), "sequential_sweep_centroid"))
+                for cell in active_comp.cells[:3]:
+                    proposals.append((2.1 - 0.10 * self.coordinate_visits[cell], cell, "sequential_sweep_cell"))
+
         # Pair Midpoints for rare matching color pairs (Symmetry / Alignment Anchors)
         for color, count in scene.color_counts:
             if color == scene.background or count != 2:
@@ -5990,6 +6043,23 @@ class CandidateGenerator:
                 if tried == 0:
                     score += 0.8
                     rationale.append("untried_here")
+
+                # Collision-Responsive Orthogonal Steering on Level 0
+                if self.memory.current_level_index == 0 and not self.memory.post_breakthrough_window_active:
+                    if self.memory.recommended_orthogonal_turn == "vertical":
+                        if action.name in ("ACTION1", "ACTION2"):
+                            score += 2.5
+                            rationale.append("orthogonal_turn_bonus")
+                        elif action.name in ("ACTION3", "ACTION4"):
+                            score -= 3.0
+                            rationale.append("collision_avoidance_penalty")
+                    elif self.memory.recommended_orthogonal_turn == "horizontal":
+                        if action.name in ("ACTION3", "ACTION4"):
+                            score += 2.5
+                            rationale.append("orthogonal_turn_bonus")
+                        elif action.name in ("ACTION1", "ACTION2"):
+                            score -= 3.0
+                            rationale.append("collision_avoidance_penalty")
                 if self.dynamics is not None and not scene.field_mode and scene.controlled_entity_id is not None:
                     reliable = self.dynamics.reliable_vectors(legal_names)
                     simple_actions = [a for a in legal_actions if not a.is_complex() and a is not GameAction.RESET]
@@ -7011,6 +7081,10 @@ class MetacognitiveController:
         self.memory.productive_search_convergence_pressure = 0.0
         self.memory.line_beam_closure_bias_used = False
         self.memory.component_delete_payoff_bias_used = False
+        self.memory.atomic_drag_drop_paired = False
+        self.memory.sequential_component_sweep_active = False
+        self.memory.orthogonal_collision_steer_used = False
+        self.memory.cell_cycle_persistence_used = False
         self.llm_step_meta = {
             "reasoner_consulted_this_step": False,
             "reasoner_parsed_abduction_this_step": False,
@@ -8195,6 +8269,63 @@ class MyAgent(Agent):
             elif event.game_over:
                 self.memory.post_breakthrough_failed_attempts += 1
         
+        # 1. Collision-Responsive Orthogonal Steering on Level 0
+        if self.memory.current_level_index == 0 and not self.memory.post_breakthrough_window_active:
+            if getattr(event, "death", False) or event.game_over:
+                if self.pending_action and self.pending_action.name in ("ACTION3", "ACTION4"):
+                    self.memory.recommended_orthogonal_turn = "vertical"
+                    self.memory.orthogonal_collision_steer_used = True
+                elif self.pending_action and self.pending_action.name in ("ACTION1", "ACTION2"):
+                    self.memory.recommended_orthogonal_turn = "horizontal"
+                    self.memory.orthogonal_collision_steer_used = True
+            elif event.changed_count > 0 and not event.no_op:
+                self.memory.recommended_orthogonal_turn = ""
+
+        # 2. Multi-Click Cell Cycle Persistence tracking
+        if event.changed_count > 0 and not event.no_op and not event.game_over and self.pending_action and self.pending_action.data:
+            p_dict = dict(self.pending_action.data)
+            if "x" in p_dict and "y" in p_dict:
+                px, py = p_dict["x"], p_dict["y"]
+                if self.memory.last_changed_coord == (px, py):
+                    self.memory.coord_cycle_clicks_remaining = max(0, self.memory.coord_cycle_clicks_remaining - 1)
+                else:
+                    self.memory.last_changed_coord = (px, py)
+                    self.memory.coord_cycle_clicks_remaining = 2
+        else:
+            self.memory.coord_cycle_clicks_remaining = max(0, self.memory.coord_cycle_clicks_remaining - 1)
+
+        # 3. Systematic Sequential Component Sweep click decrement
+        if self.memory.active_sweep_clicks_remaining > 0:
+            self.memory.active_sweep_clicks_remaining -= 1
+            if self.memory.active_sweep_clicks_remaining <= 0:
+                self.memory.active_sweep_component_id = None
+
+        # 4. Atomic Two-Phase Drag/Drop Pairing (ACTION6 -> ACTION7) in drag_or_push / movement_control
+        if (
+            self.memory.current_level_index == 0
+            and not self.memory.post_breakthrough_window_active
+            and self.pending_action
+            and self.pending_action.name == "ACTION6"
+            and not event.no_op
+            and not event.game_over
+            and self.memory.top_mechanism_family in ("drag_or_push", "movement_control")
+            and len(self.memory.macro_replay_queue) == 0
+        ):
+            p_dict = dict(self.pending_action.data) if self.pending_action.data else {}
+            if "x" in p_dict and "y" in p_dict:
+                src_x, src_y = p_dict["x"], p_dict["y"]
+                moves = getattr(event, "entity_moves", ())
+                if moves:
+                    m = moves[0]
+                    dx = m[1] if isinstance(m, (tuple, list)) and len(m) >= 3 else getattr(m, "dx", 0)
+                    dy = m[2] if isinstance(m, (tuple, list)) and len(m) >= 3 else getattr(m, "dy", 0)
+                    if dx != 0 or dy != 0:
+                        dst_x, dst_y = src_x + dx, src_y + dy
+                        if 0 <= dst_x < scene.width and 0 <= dst_y < scene.height:
+                            act7 = ActionSpec(name="ACTION7", data=(("x", dst_x), ("y", dst_y)), source="atomic_drag_drop_pair")
+                            self.memory.macro_replay_queue.append(act7)
+                            self.memory.atomic_drag_drop_paired = True
+
         # Zero-tolerance NO-OP coordinate blacklisting in exploitation mode
         if (self.memory.mode == "exploitation_mode" or self.memory.post_breakthrough_window_active) and event.no_op and self.pending_action:
             p_data = self.pending_action.data_dict
@@ -8463,6 +8594,10 @@ class MyAgent(Agent):
             productive_search_convergence_pressure=float(self.memory.productive_search_convergence_pressure),
             line_beam_closure_bias_used=bool(self.memory.line_beam_closure_bias_used),
             component_delete_payoff_bias_used=bool(self.memory.component_delete_payoff_bias_used),
+            atomic_drag_drop_paired=bool(self.memory.atomic_drag_drop_paired),
+            sequential_component_sweep_active=bool(self.memory.sequential_component_sweep_active),
+            orthogonal_collision_steer_used=bool(self.memory.orthogonal_collision_steer_used),
+            cell_cycle_persistence_used=bool(self.memory.cell_cycle_persistence_used),
             regrounded_winning_coords=self.memory.regrounded_winning_coords,
             regrounding_delta=self.memory.regrounding_delta,
             regrounding_confidence=float(self.memory.regrounding_confidence),
