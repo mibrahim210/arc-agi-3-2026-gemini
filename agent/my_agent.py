@@ -2083,6 +2083,7 @@ class TraceMemory:
         self.cell_cycle_persistence_used: bool = False
         self.active_sweep_component_id: int | None = None
         self.active_sweep_clicks_remaining: int = 0
+        self.visited_sweep_component_anchors: set[tuple[int, int]] = set()
         self.recommended_orthogonal_turn: str = ""
         self.last_changed_coord: tuple[int, int] | None = None
         self.coord_cycle_clicks_remaining: int = 0
@@ -2238,6 +2239,7 @@ class TraceMemory:
             self.priority_program_families = []
             self.priority_program_ttl = 0
         self.invariants_to_preserve.clear()
+        self.visited_sweep_component_anchors.clear()
         self.mechanism_shift_event = False
         self.recommended_probe_type = ""
         self.recommended_probe_ttl = 0
@@ -5950,26 +5952,21 @@ class CandidateGenerator:
             and (self.memory.top_mechanism_family == "targeted_recolor" or "targeted_recolor" in self.memory.competing_mechanism_families)
             and scene.components
         ):
-            active_comp = None
             interior_comps = [c for c in scene.components if c.color != scene.background and not c.touches_border and c.centroid[1] > 2.5 and c.centroid[0] > 2.5]
-            if self.memory.active_sweep_component_id is not None:
-                for comp in interior_comps:
-                    if id(comp) == self.memory.active_sweep_component_id:
-                        active_comp = comp
-                        break
-            if active_comp is None and interior_comps:
-                sorted_comps = sorted(interior_comps, key=lambda c: c.area)
+            unswept_comps = [
+                c for c in interior_comps
+                if (int(round(c.centroid[0])), int(round(c.centroid[1]))) not in self.memory.visited_sweep_component_anchors
+            ]
+            target_comps = unswept_comps if unswept_comps else interior_comps
+            if target_comps:
+                sorted_comps = sorted(target_comps, key=lambda c: (c.area, self.coordinate_visits[(int(round(c.centroid[0])), int(round(c.centroid[1])))]))
                 active_comp = sorted_comps[0]
-                self.memory.active_sweep_component_id = id(active_comp)
-                self.memory.active_sweep_clicks_remaining = min(4, len(active_comp.cells) + 1)
-            
-            if active_comp is not None and self.memory.active_sweep_clicks_remaining > 0:
-                self.memory.sequential_component_sweep_active = True
                 cx, cy = int(round(active_comp.centroid[0])), int(round(active_comp.centroid[1]))
+                self.memory.sequential_component_sweep_active = True
                 if 0 <= cx < scene.width and 0 <= cy < scene.height:
-                    proposals.append((2.2 - 0.10 * self.coordinate_visits[(cx, cy)], (cx, cy), "sequential_sweep_centroid"))
+                    proposals.append((2.5 - 0.10 * self.coordinate_visits[(cx, cy)], (cx, cy), "sequential_sweep_centroid"))
                 for cell in active_comp.cells[:3]:
-                    proposals.append((2.1 - 0.10 * self.coordinate_visits[cell], cell, "sequential_sweep_cell"))
+                    proposals.append((2.3 - 0.10 * self.coordinate_visits[cell], cell, "sequential_sweep_cell"))
 
         # Pair Midpoints for rare matching color pairs (Symmetry / Alignment Anchors)
         for color, count in scene.color_counts:
@@ -8713,6 +8710,12 @@ class MyAgent(Agent):
             self.memory.coord_cycle_clicks_remaining = max(0, self.memory.coord_cycle_clicks_remaining - 1)
 
         # 3. Systematic Sequential Component Sweep click decrement and anti-stall
+        if self.pending_action and self.pending_action.data:
+            p_dict = dict(self.pending_action.data)
+            if "x" in p_dict and "y" in p_dict:
+                px, py = p_dict["x"], p_dict["y"]
+                if self.memory.spatial_visits.get((px, py), 0) >= 2 or event.no_op:
+                    self.memory.visited_sweep_component_anchors.add((px, py))
         if self.memory.active_sweep_clicks_remaining > 0:
             if event.no_op or event.changed_count == 0:
                 self.memory.active_sweep_clicks_remaining = 0
@@ -9041,6 +9044,39 @@ class MyAgent(Agent):
             finish_family_collision_suppressed_until_step=int(self.memory.finish_family_collision_suppressed_until_step),
             finish_mode_preempted_counterfactual=bool(self.memory.finish_mode_preempted_counterfactual),
             finish_mode_preempt_block_reason=str(self.memory.finish_mode_preempt_block_reason),
+            productive_branch_signature=str(self.memory.productive_branch_signature),
+            productive_branch_source=str(self.memory.productive_branch_source),
+            productive_branch_action_name=str(self.memory.productive_branch_action_name),
+            productive_branch_anchor=self.memory.productive_branch_anchor,
+            productive_branch_family_hint=str(self.memory.productive_branch_family_hint),
+            productive_branch_program_kind=str(self.memory.productive_branch_program_kind),
+            productive_branch_streak=int(self.memory.productive_branch_streak),
+            productive_branch_last_effective_step=int(self.memory.productive_branch_last_effective_step),
+            productive_branch_family_wobble_tolerated=bool(self.memory.productive_branch_family_wobble_tolerated),
+            productive_branch_family_wobble_reason=str(self.memory.productive_branch_family_wobble_reason),
+            structured_branch_persistence_used=bool(self.memory.structured_branch_persistence_used),
+            structured_branch_persistence_steps=int(self.memory.structured_branch_persistence_steps),
+            structured_branch_persistence_steps_remaining=int(self.memory.structured_branch_persistence_steps_remaining),
+            structured_branch_persistence_kept_control=bool(self.memory.structured_branch_persistence_kept_control),
+            structured_branch_persistence_break_reason=str(self.memory.structured_branch_persistence_break_reason),
+            finish_bound_branch_signature=str(self.memory.finish_bound_branch_signature),
+            finish_bound_branch_source=str(self.memory.finish_bound_branch_source),
+            finish_bound_branch_anchor=self.memory.finish_bound_branch_anchor,
+            finish_bound_branch_action_name=str(self.memory.finish_bound_branch_action_name),
+            finish_bound_branch_kept_control=bool(self.memory.finish_bound_branch_kept_control),
+            post_breakthrough_priority_preserved=bool(self.memory.post_breakthrough_priority_preserved),
+            post_breakthrough_preempt_block_reason=str(self.memory.post_breakthrough_preempt_block_reason),
+            post_breakthrough_local_branch_reused=bool(self.memory.post_breakthrough_local_branch_reused),
+            post_breakthrough_local_branch_break_reason=str(self.memory.post_breakthrough_local_branch_break_reason),
+            productive_branch_collision_recovery_used=bool(self.memory.productive_branch_collision_recovery_used),
+            productive_branch_collision_recovery_variant=str(self.memory.productive_branch_collision_recovery_variant),
+            productive_branch_collision_recovery_preserved_family=bool(self.memory.productive_branch_collision_recovery_preserved_family),
+            productive_window_extended=bool(self.memory.productive_window_extended),
+            productive_window_extension_reason=str(self.memory.productive_window_extension_reason),
+            productive_branch_preempt_blocked=bool(self.memory.productive_branch_preempt_blocked),
+            productive_branch_preempt_block_reason=str(self.memory.productive_branch_preempt_block_reason),
+            collision_soft_retry_used=bool(self.memory.collision_soft_retry_used),
+            collision_soft_retry_variant=str(self.memory.collision_soft_retry_variant),
             regrounded_winning_coords=self.memory.regrounded_winning_coords,
             regrounding_delta=self.memory.regrounding_delta,
             regrounding_confidence=float(self.memory.regrounding_confidence),
