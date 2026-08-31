@@ -724,6 +724,10 @@ class DiagnosticTraceRecord:
     finish_bound_branch_selection_bias_used: bool = False
     collision_recovery_candidate_injected: bool = False
     productive_window_extension_kept_control: bool = False
+    structured_persistence_gate_passed: bool = False
+    structured_persistence_decay_exit_reason: str = ""
+    structured_persistence_decay_triggered: bool = False
+    post_breakthrough_outranked_persistence: bool = False
     regrounded_winning_coords: Any = None
     regrounding_delta: Any = None
     regrounding_confidence: float = 0.0
@@ -735,6 +739,32 @@ class DiagnosticTraceRecord:
     exploitation_noop_blacklist_checks: int = 0
     exploitation_noop_blacklist_hits: int = 0
     mechanism_detector_triggered: str = ""
+    control_band_saturation_detected: bool = False
+    control_band_orientation: str = ""
+    control_band_bias_applied: bool = False
+    interior_transition_bias_applied: bool = False
+    two_anchor_oscillation_detected: bool = False
+    two_anchor_oscillation_breakout_applied: bool = False
+    two_anchor_suppressed_anchors: Any = ()
+    two_anchor_suppression_steps_remaining: int = 0
+    interior_exploitation_window_active: bool = False
+    interior_exploitation_window_steps_remaining: int = 0
+    productive_breakout_branch_seed_active: bool = False
+    productive_breakout_branch_seed_coord: Any = None
+    small_cycle_oscillation_detected: bool = False
+    small_cycle_suppression_applied: bool = False
+    meaningful_progress_detected: bool = False
+    micro_change_churn_detected: bool = False
+    control_band_setup_budget_remaining: int = 4
+    interior_application_phase_active: bool = False
+    productive_breakout_direction: Any = None
+    directional_breakout_bias_applied: bool = False
+    finish_corridor_active: bool = False
+    finish_corridor_steps_remaining: int = 0
+    finish_corridor_anchor: Any = None
+    finish_corridor_family: str = ""
+    finish_corridor_bias_applied: bool = False
+    finish_corridor_exit_reason: str = ""
 
 
 @dataclass(slots=True)
@@ -2150,6 +2180,37 @@ class TraceMemory:
         self.collision_soft_retry_used: bool = False
         self.collision_soft_retry_variant: str = ""
         self.collision_soft_retry_count: int = 0
+        self.recent_action_coords: list[tuple[int, int]] = []
+        self.control_band_saturation_detected: bool = False
+        self.control_band_orientation: str = ""
+        self.control_band_bias_applied: bool = False
+        self.interior_transition_bias_applied: bool = False
+        self.two_anchor_oscillation_detected: bool = False
+        self.two_anchor_oscillation_breakout_applied: bool = False
+        self.two_anchor_suppressed_anchors: tuple[tuple[int, int], ...] = ()
+        self.two_anchor_suppression_steps_remaining: int = 0
+        self.interior_exploitation_window_active: bool = False
+        self.interior_exploitation_window_steps_remaining: int = 0
+        self.control_band_saturation_streak: int = 0
+        self.productive_breakout_branch_seed_active: bool = False
+        self.productive_breakout_branch_seed_coord: tuple[int, int] | None = None
+        self.productive_breakout_branch_seed_family: str = ""
+        self.productive_breakout_branch_seed_steps_remaining: int = 0
+        self.small_cycle_oscillation_detected: bool = False
+        self.small_cycle_suppression_applied: bool = False
+        self.meaningful_progress_detected: bool = False
+        self.micro_change_churn_detected: bool = False
+        self.control_band_setup_budget_remaining: int = 4
+        self.interior_application_phase_active: bool = False
+        self.productive_breakout_direction: tuple[int, int] | None = None
+        self.directional_breakout_bias_applied: bool = False
+        self.finish_corridor_active: bool = False
+        self.finish_corridor_steps_remaining: int = 0
+        self.finish_corridor_anchor: tuple[int, int] | None = None
+        self.finish_corridor_family: str = ""
+        self.finish_corridor_bias_applied: bool = False
+        self.finish_corridor_exit_reason: str = ""
+        self.meaningful_progress_streak: int = 0
         self.structured_branch_persistence_selection_bias_used: bool = False
         self.productive_branch_signature_reused_by_neighborhood: bool = False
         self.post_breakthrough_override_blocked: bool = False
@@ -2157,6 +2218,10 @@ class TraceMemory:
         self.finish_bound_branch_selection_bias_used: bool = False
         self.collision_recovery_candidate_injected: bool = False
         self.productive_window_extension_kept_control: bool = False
+        self.structured_persistence_gate_passed: bool = False
+        self.structured_persistence_decay_exit_reason: str = ""
+        self.structured_persistence_decay_triggered: bool = False
+        self.post_breakthrough_outranked_persistence: bool = False
         self.finish_family_collision_counts: dict[str, int] = {}
         self.recent_completion_scores: list[float] = []
         self.recent_mechanism_families: list[str] = []
@@ -2261,6 +2326,41 @@ class TraceMemory:
         self.finish_bound_branch_selection_bias_used = False
         self.collision_recovery_candidate_injected = False
         self.productive_window_extension_kept_control = False
+        self.recent_action_coords.clear()
+        self.control_band_saturation_detected = False
+        self.control_band_orientation = ""
+        self.control_band_bias_applied = False
+        self.interior_transition_bias_applied = False
+        self.two_anchor_oscillation_detected = False
+        self.two_anchor_oscillation_breakout_applied = False
+        self.two_anchor_suppressed_anchors = ()
+        self.two_anchor_suppression_steps_remaining = 0
+        self.interior_exploitation_window_active = False
+        self.interior_exploitation_window_steps_remaining = 0
+        self.control_band_saturation_streak = 0
+        self.productive_breakout_branch_seed_active = False
+        self.productive_breakout_branch_seed_coord = None
+        self.productive_breakout_branch_seed_family = ""
+        self.productive_breakout_branch_seed_steps_remaining = 0
+        self.small_cycle_oscillation_detected = False
+        self.small_cycle_suppression_applied = False
+        self.meaningful_progress_detected = False
+        self.micro_change_churn_detected = False
+        self.control_band_setup_budget_remaining = 4
+        self.interior_application_phase_active = False
+        self.productive_breakout_direction = None
+        self.directional_breakout_bias_applied = False
+        self.finish_corridor_active = False
+        self.finish_corridor_steps_remaining = 0
+        self.finish_corridor_anchor = None
+        self.finish_corridor_family = ""
+        self.finish_corridor_bias_applied = False
+        self.finish_corridor_exit_reason = ""
+        self.meaningful_progress_streak = 0
+        self.structured_persistence_gate_passed = False
+        self.structured_persistence_decay_exit_reason = ""
+        self.structured_persistence_decay_triggered = False
+        self.post_breakthrough_outranked_persistence = False
         self.mechanism_shift_event = False
         self.recommended_probe_type = ""
         self.recommended_probe_ttl = 0
@@ -5839,17 +5939,25 @@ class CandidateGenerator:
             for comp in scene.components:
                 x, y = int(round(comp.centroid[0])), int(
                     round(comp.centroid[1]))
-                is_border = (y <= 2 or x <= 2 or y >= scene.height - 3 or x >= scene.width - 3)
-                if is_border:
-                    score = 0.8 - 0.20 * self.coordinate_visits[(x, y)]
-                else:
-                    rarity = 1.0 - min(1.0, color_freq.get(comp.color, 1.0) * 12.0)
-                    small = 1.0 / math.sqrt(max(1, comp.area))
-                    score = 2.0 * rarity + 1.1 * small - 0.20 * self.coordinate_visits[(x, y)]
+                rarity = 1.0 - min(1.0, color_freq.get(comp.color, 1.0) * 12.0)
+                small = 1.0 / math.sqrt(max(1, comp.area))
+                score = 2.0 * rarity + 1.1 * small - 0.20 * self.coordinate_visits[(x, y)]
                 proposals.append((score, (x, y), "rare_small_component"))
                 x0, y0, x1, y1 = comp.bbox
                 for point in {(x0, y0), (x1, y0), (x0, y1), (x1, y1)}:
                     proposals.append((score - 0.35, point, "component_corner"))
+
+        # Actionable local collision recovery around productive anchor
+        if self.memory.collision_soft_retry_used and self.memory.productive_branch_anchor is not None:
+            ax, ay = self.memory.productive_branch_anchor
+            for dy in (-1, 0, 1):
+                for dx in (-1, 0, 1):
+                    if dx == 0 and dy == 0:
+                        continue
+                    nx, ny = ax + dx, ay + dy
+                    if 0 <= nx < scene.width and 0 <= ny < scene.height:
+                        proposals.append((3.8 - 0.12 * self.coordinate_visits[(nx, ny)], (nx, ny), "collision_recovery_local_neighbor"))
+            self.memory.collision_recovery_candidate_injected = True
 
         # Bounded local continuation search around transferred/regrounded targets
         reground_coords = self.memory.regrounded_winning_coords or self.memory.transferred_winning_coords
@@ -5887,10 +5995,8 @@ class CandidateGenerator:
             rarity = 1.0 - min(1.0, count / total * 16.0)
             for idx in sample_indices:
                 point = (int(xs[idx]), int(ys[idx]))
-                is_border = (point[1] <= 2 or point[0] <= 2 or point[1] >= scene.height - 3 or point[0] >= scene.width - 3)
-                base = 1.2 if not is_border else 0.4
                 proposals.append(
-                    (base + rarity - 0.12 * self.coordinate_visits[point], point, "raw_rare_color"))
+                    (1.2 + rarity - 0.12 * self.coordinate_visits[point], point, "raw_rare_color"))
 
         # Component-Delete Coordinate Hardening: Restrict to active non-background connected components with payoff ranking
         is_comp_delete = (self.memory.top_mechanism_family == "component_delete" and self.memory.top_mechanism_confidence >= 0.28 and len(self.memory.transitions) >= 4)
@@ -5901,17 +6007,24 @@ class CandidateGenerator:
             for comp in sorted_comps:
                 if comp.color != scene.background:
                     cx, cy = int(round(comp.centroid[0])), int(round(comp.centroid[1]))
-                    if cx <= 2 or cy <= 2 or cx >= scene.width - 3 or cy >= scene.height - 3:
-                        continue
                     size_bonus = 1.0 if comp.area <= 4 else (0.5 if comp.area <= 12 else 0.0)
                     proposals.append((3.2 + size_bonus - 0.15 * self.coordinate_visits[(cx, cy)], (cx, cy), "comp_delete_live_centroid"))
                     x0, y0, x1, y1 = comp.bbox
                     bx, by = (x0 + x1) // 2, (y0 + y1) // 2
                     proposals.append((3.0 + size_bonus - 0.15 * self.coordinate_visits[(bx, by)], (bx, by), "comp_delete_live_bbox_center"))
                     for cell in comp.cells[:6]:
-                        if cell[0] > 2 and cell[1] > 2 and cell[0] < scene.width - 3 and cell[1] < scene.height - 3:
-                            proposals.append((2.8 + size_bonus - 0.15 * self.coordinate_visits[cell], cell, "comp_delete_live_cell"))
+                        proposals.append((2.8 + size_bonus - 0.15 * self.coordinate_visits[cell], cell, "comp_delete_live_cell"))
                     self.memory.component_delete_payoff_bias_used = True
+
+        # Finish corridor mode proposals near active corridor anchor
+        if self.memory.finish_corridor_active and (self.memory.finish_corridor_anchor or self.memory.productive_branch_anchor):
+            ax, ay = self.memory.finish_corridor_anchor or self.memory.productive_branch_anchor
+            for dy in (-2, -1, 0, 1, 2):
+                for dx in (-2, -1, 0, 1, 2):
+                    nx, ny = ax + dx, ay + dy
+                    if 0 <= nx < scene.width and 0 <= ny < scene.height:
+                        dist = max(abs(dx), abs(dy))
+                        proposals.append((3.6 - 0.4 * dist - 0.12 * self.coordinate_visits[(nx, ny)], (nx, ny), "finish_corridor_local_candidate"))
 
         # Structured Line-or-Beam Proposals: Interpolate ray/axis coordinates between matching endpoints and corner closures
         is_line_beam = (self.memory.top_mechanism_family == "line_or_beam" and self.memory.top_mechanism_confidence >= 0.28 and len(self.memory.transitions) >= 4)
@@ -5923,12 +6036,8 @@ class CandidateGenerator:
                 ys, xs = np.where(scene.grid == color)
                 for i in range(len(xs)):
                     p1_x, p1_y = int(xs[i]), int(ys[i])
-                    if p1_x <= 2 or p1_y <= 2 or p1_x >= scene.width - 3 or p1_y >= scene.height - 3:
-                        continue
                     for j in range(i + 1, len(xs)):
                         p2_x, p2_y = int(xs[j]), int(ys[j])
-                        if p2_x <= 2 or p2_y <= 2 or p2_x >= scene.width - 3 or p2_y >= scene.height - 3:
-                            continue
                         if p1_x == p2_x:
                             min_y, max_y = min(p1_y, p2_y), max(p1_y, p2_y)
                             for y_mid in range(min_y, max_y + 1):
@@ -5984,7 +6093,7 @@ class CandidateGenerator:
             and (self.memory.top_mechanism_family == "targeted_recolor" or "targeted_recolor" in self.memory.competing_mechanism_families)
             and scene.components
         ):
-            interior_comps = [c for c in scene.components if c.color != scene.background and not c.touches_border and c.centroid[1] > 2.5 and c.centroid[0] > 2.5]
+            interior_comps = [c for c in scene.components if c.color != scene.background]
             unswept_comps = [
                 c for c in interior_comps
                 if (int(round(c.centroid[0])), int(round(c.centroid[1]))) not in self.memory.visited_sweep_component_anchors
@@ -5999,6 +6108,47 @@ class CandidateGenerator:
                     proposals.append((2.5 - 0.10 * self.coordinate_visits[(cx, cy)], (cx, cy), "sequential_sweep_centroid"))
                 for cell in active_comp.cells[:3]:
                     proposals.append((2.3 - 0.10 * self.coordinate_visits[cell], cell, "sequential_sweep_cell"))
+
+        # Interior transition proposals away from saturated control band / during interior exploitation window
+        if (self.memory.control_band_saturation_detected or self.memory.interior_exploitation_window_active or self.memory.interior_application_phase_active) and scene.components:
+            band = self.memory.control_band_orientation
+            boost = 4.0 if self.memory.interior_application_phase_active else (3.2 if self.memory.interior_exploitation_window_active else 2.8)
+            for comp in scene.components:
+                if comp.color != scene.background:
+                    cx, cy = int(round(comp.centroid[0])), int(round(comp.centroid[1]))
+                    is_interior = (
+                        (band == "horizontal_top" and cy >= 5)
+                        or (band == "horizontal_bottom" and cy <= scene.height - 6)
+                        or (band == "vertical_left" and cx >= 5)
+                        or (band == "vertical_right" and cx <= scene.width - 6)
+                        or (band in ("horizontal_slice", "vertical_slice"))
+                    )
+                    if is_interior and 0 <= cx < scene.width and 0 <= cy < scene.height:
+                        proposals.append((boost - 0.15 * self.coordinate_visits[(cx, cy)], (cx, cy), "interior_transition_after_band_saturation"))
+
+        # Productive breakout branch seed and directional continuation proposals
+        if self.memory.productive_breakout_branch_seed_active and self.memory.productive_breakout_branch_seed_coord is not None:
+            bx, by = self.memory.productive_breakout_branch_seed_coord
+            dir_x, dir_y = self.memory.productive_breakout_direction if self.memory.productive_breakout_direction else (0, 0)
+            for dy in (-2, -1, 0, 1, 2):
+                for dx in (-2, -1, 0, 1, 2):
+                    nx, ny = bx + dx, by + dy
+                    if 0 <= nx < scene.width and 0 <= ny < scene.height:
+                        dist = max(abs(dx), abs(dy))
+                        dir_bonus = 0.6 if (dir_x != 0 and dx * dir_x > 0) or (dir_y != 0 and dy * dir_y > 0) else 0.0
+                        seed_score = 3.2 + dir_bonus - 0.35 * dist - 0.12 * self.coordinate_visits[(nx, ny)]
+                        proposals.append((seed_score, (nx, ny), "breakout_branch_seed_neighborhood"))
+
+        # Small-cycle and two-anchor oscillation suppression in candidate generation
+        if self.memory.two_anchor_suppression_steps_remaining > 0 and self.memory.two_anchor_suppressed_anchors:
+            suppressed = set(self.memory.two_anchor_suppressed_anchors)
+            adjusted_proposals = []
+            for score, pt, why in proposals:
+                if pt in suppressed:
+                    adjusted_proposals.append((score - 3.5, pt, f"{why}_suppressed_oscillation"))
+                else:
+                    adjusted_proposals.append((score, pt, why))
+            proposals = adjusted_proposals
 
         # Pair Midpoints for rare matching color pairs (Symmetry / Alignment Anchors)
         for color, count in scene.color_counts:
@@ -7256,9 +7406,10 @@ class MetacognitiveController:
         if prediction is not None:
             score += 0.8 * prediction.confidence - 0.6 * prediction.uncertainty
 
-        # 1. Post-Breakthrough Priority: Transferred winning actions/regrounded coords outrank finish mode and fallback
+        # 1. Post-Breakthrough Priority: Transferred winning actions/regrounded coords outrank persistence and finish mode
         if self.memory.post_breakthrough_window_active or self.memory.current_level_index > 0:
             self.memory.post_breakthrough_priority_preserved = True
+            self.memory.post_breakthrough_outranked_persistence = True
             self.memory.post_breakthrough_preempt_block_reason = "transferred_level_priors_active"
             p_kind = getattr(prediction, "kind", "") if prediction else ""
             if p_kind and (p_kind == self.memory.transferred_winning_program_kind or p_kind == self.memory.transferred_winning_family):
@@ -7266,7 +7417,7 @@ class MetacognitiveController:
                 self.memory.productive_branch_commitment_used = True
                 self.memory.post_breakthrough_local_branch_reused = True
             if candidate.spec.name == self.memory.transferred_winning_action_name:
-                score += 4.0
+                score += 4.5
                 self.memory.productive_branch_commitment_used = True
                 self.memory.post_breakthrough_local_branch_reused = True
             if self.memory.regrounded_winning_coords and candidate.spec.data:
@@ -7274,40 +7425,58 @@ class MetacognitiveController:
                 if "x" in c_dict and "y" in c_dict:
                     dist = max(abs(c_dict["x"] - self.memory.regrounded_winning_coords[0]), abs(c_dict["y"] - self.memory.regrounded_winning_coords[1]))
                     if dist <= 2:
-                        score += 4.5
+                        score += 5.0
                         self.memory.productive_branch_commitment_used = True
                         self.memory.post_breakthrough_local_branch_reused = True
 
-        # 2. Structured Persistence Authority: Drives real candidate selection when persistence is active
+        # 2. Baseline-Safe Structured Persistence: Only active when gated by real convergence/completion evidence
         elif (
             self.memory.current_level_index == 0
             and not self.memory.post_breakthrough_window_active
             and self.memory.structured_branch_persistence_used
             and self.memory.structured_branch_persistence_steps_remaining > 0
         ):
-            p_kind = getattr(prediction, "kind", "") if prediction else ""
-            # Multi-criteria consistency check: match at least 2 of (action_name, structured_source, local_neighborhood, program_kind/family)
-            matches_count = 0
-            if self.memory.productive_branch_action_name and candidate.spec.name == self.memory.productive_branch_action_name:
-                matches_count += 1
-            if candidate.spec.source in ("counterfactual_program_search", "macro_replay", "verified_plan_queue", "counterfactual_program", self.memory.productive_branch_source):
-                matches_count += 1
-            if self.memory.productive_branch_anchor is not None and candidate.spec.data:
-                c_dict = dict(candidate.spec.data)
-                if "x" in c_dict and "y" in c_dict:
-                    bx, by = self.memory.productive_branch_anchor
-                    if max(abs(c_dict["x"] - bx), abs(c_dict["y"] - by)) <= 3:
-                        matches_count += 1
-            if p_kind and (p_kind == self.memory.productive_branch_program_kind or p_kind == self.memory.productive_branch_family_hint):
-                matches_count += 1
+            # Baseline-safe persistence gate: require completion bias >= 1.5, terminal bonus >= 1.5, convergence pressure >= 1.5, or 2+ recent anchor transitions
+            has_recent_anchor_evidence = False
+            if self.memory.productive_branch_anchor is not None:
+                bx, by = self.memory.productive_branch_anchor
+                non_noop_count = sum(
+                    1 for t in list(self.memory.transitions)[-5:]
+                    if not t.event.no_op and t.action.data
+                    and max(abs(dict(t.action.data).get("x", -999) - bx), abs(dict(t.action.data).get("y", -999) - by)) <= 3
+                )
+                if non_noop_count >= 2:
+                    has_recent_anchor_evidence = True
 
-            if matches_count >= 2:
-                score += 4.5
-                self.memory.structured_branch_persistence_kept_control = True
-                self.memory.structured_branch_persistence_selection_bias_used = True
-                self.memory.productive_branch_commitment_used = True
-                if self.memory.productive_window_extended:
-                    self.memory.productive_window_extension_kept_control = True
+            gate_passed = (
+                self.memory.counterfactual_completion_bias >= 1.5
+                or self.memory.terminal_condition_bonus >= 1.5
+                or self.memory.productive_search_convergence_pressure >= 1.5
+                or has_recent_anchor_evidence
+            )
+            if gate_passed:
+                self.memory.structured_persistence_gate_passed = True
+                p_kind = getattr(prediction, "kind", "") if prediction else ""
+                is_branch_match = False
+                if self.memory.productive_branch_action_name and candidate.spec.name == self.memory.productive_branch_action_name:
+                    if self.memory.productive_branch_anchor is not None and candidate.spec.data:
+                        c_dict = dict(candidate.spec.data)
+                        if "x" in c_dict and "y" in c_dict:
+                            bx, by = self.memory.productive_branch_anchor
+                            if max(abs(c_dict["x"] - bx), abs(c_dict["y"] - by)) <= 3:
+                                is_branch_match = True
+                    elif not candidate.spec.data:
+                        is_branch_match = True
+                elif p_kind and (p_kind == self.memory.productive_branch_program_kind or p_kind == self.memory.productive_branch_family_hint):
+                    is_branch_match = True
+
+                if is_branch_match:
+                    score += 4.5
+                    self.memory.structured_branch_persistence_kept_control = True
+                    self.memory.structured_branch_persistence_selection_bias_used = True
+                    self.memory.productive_branch_commitment_used = True
+                    if self.memory.productive_window_extended:
+                        self.memory.productive_window_extension_kept_control = True
 
         # 3. Finish-Bound Branch Authority: Explicitly prefers bound branch before generic structured candidates
         elif (
@@ -7338,18 +7507,92 @@ class MetacognitiveController:
                 self.memory.finish_bound_branch_kept_control = True
                 self.memory.finish_bound_branch_selection_bias_used = True
                 self.memory.finish_branch_continuation_kept_control = True
-                self.memory.productive_branch_commitment_used = True
-                if self.memory.productive_window_extended:
-                    self.memory.productive_window_extension_kept_control = True
-            elif p_kind and (p_kind == target_family or p_kind in top_kinds):
-                score += 3.5
-                self.memory.productive_branch_commitment_used = True
-                self.memory.finish_branch_continuation_family = target_family
-                self.memory.finish_branch_continuation_kept_control = True
-            elif candidate.spec.source in (self.memory.near_terminal_finish_source, self.memory.productive_branch_source):
-                score += 3.0
-                self.memory.productive_branch_commitment_used = True
-                self.memory.finish_branch_continuation_kept_control = True
+
+        # 4. Control-Band Saturation and Interior Application Phase Biases
+        if (self.memory.control_band_saturation_detected or self.memory.interior_exploitation_window_active or self.memory.interior_application_phase_active) and candidate.spec.data:
+            c_dict = dict(candidate.spec.data)
+            if "x" in c_dict and "y" in c_dict:
+                cx, cy = c_dict["x"], c_dict["y"]
+                band = self.memory.control_band_orientation
+                is_in_band = (
+                    (band == "horizontal_top" and cy <= 3)
+                    or (band == "horizontal_bottom" and cy >= scene.height - 4)
+                    or (band == "vertical_left" and cx <= 3)
+                    or (band == "vertical_right" and cx >= scene.width - 4)
+                    or (band == "horizontal_slice" and any(abs(cy - y0) <= 2 for _, y0 in self.memory.recent_action_coords[-6:]))
+                    or (band == "vertical_slice" and any(abs(cx - x0) <= 2 for x0, _ in self.memory.recent_action_coords[-6:]))
+                )
+                if is_in_band:
+                    penalty = 6.0 if self.memory.interior_application_phase_active else (3.5 if self.memory.interior_exploitation_window_active else 1.5)
+                    score -= penalty
+                    self.memory.control_band_bias_applied = True
+                else:
+                    is_interior = (
+                        (band == "horizontal_top" and cy >= 5)
+                        or (band == "horizontal_bottom" and cy <= scene.height - 6)
+                        or (band == "vertical_left" and cx >= 5)
+                        or (band == "vertical_right" and cx <= scene.width - 6)
+                        or (band in ("horizontal_slice", "vertical_slice"))
+                    )
+                    if is_interior:
+                        boost = 3.5 if self.memory.interior_application_phase_active else (2.5 if self.memory.interior_exploitation_window_active else 1.5)
+                        score += boost
+                        self.memory.interior_transition_bias_applied = True
+
+        # 5. Finish-Corridor Mode Authority
+        if self.memory.finish_corridor_active and candidate.spec.data:
+            c_dict = dict(candidate.spec.data)
+            if "x" in c_dict and "y" in c_dict:
+                cx, cy = c_dict["x"], c_dict["y"]
+                anchor = self.memory.finish_corridor_anchor or self.memory.productive_branch_anchor
+                if anchor:
+                    ax, ay = anchor
+                    dist = max(abs(cx - ax), abs(cy - ay))
+                    if dist <= 3:
+                        score += 3.5 - 0.4 * dist
+                        self.memory.finish_corridor_bias_applied = True
+                    elif dist > 6:
+                        score -= 3.5
+                p_kind = getattr(prediction, "kind", "") if prediction else ""
+                if self.memory.finish_corridor_family and (p_kind == self.memory.finish_corridor_family or candidate.spec.name == self.memory.productive_branch_action_name):
+                    score += 2.0
+                    self.memory.finish_corridor_bias_applied = True
+
+        # 6. Productive Breakout Branch Seed & Anti-Drift Directional Continuation
+        if self.memory.productive_breakout_branch_seed_active and self.memory.productive_breakout_branch_seed_coord is not None and candidate.spec.data:
+            c_dict = dict(candidate.spec.data)
+            if "x" in c_dict and "y" in c_dict:
+                bx, by = self.memory.productive_breakout_branch_seed_coord
+                cx, cy = c_dict["x"], c_dict["y"]
+                dist = max(abs(cx - bx), abs(cy - by))
+                if dist <= 3:
+                    score += 2.5 - 0.3 * dist
+                elif dist > 6:
+                    score -= 3.0
+                if self.memory.productive_breakout_direction is not None:
+                    dir_x, dir_y = self.memory.productive_breakout_direction
+                    cand_dx = cx - bx
+                    cand_dy = cy - by
+                    is_aligned_dir = (dir_x != 0 and (cand_dx * dir_x > 0)) or (dir_y != 0 and (cand_dy * dir_y > 0))
+                    if is_aligned_dir:
+                        score += 2.0
+                        self.memory.directional_breakout_bias_applied = True
+                if (cx, cy) in self.memory.two_anchor_suppressed_anchors:
+                    score -= 3.0
+            p_kind = getattr(prediction, "kind", "") if prediction else ""
+            if self.memory.productive_breakout_branch_seed_family and (p_kind == self.memory.productive_breakout_branch_seed_family or candidate.spec.name == self.memory.productive_branch_action_name):
+                score += 1.5
+
+        # 6. Small-Cycle and Two-Anchor Oscillation Suppression
+        if self.memory.two_anchor_suppression_steps_remaining > 0 and candidate.spec.data:
+            c_dict = dict(candidate.spec.data)
+            if "x" in c_dict and "y" in c_dict:
+                pt = (c_dict["x"], c_dict["y"])
+                if pt in self.memory.two_anchor_suppressed_anchors:
+                    score -= 3.5
+                    self.memory.two_anchor_oscillation_breakout_applied = True
+                    if self.memory.small_cycle_oscillation_detected:
+                        self.memory.small_cycle_suppression_applied = True
 
         return score, decision, prediction
 
@@ -7398,7 +7641,16 @@ class MetacognitiveController:
         self.memory.structured_branch_persistence_selection_bias_used = False
         self.memory.finish_bound_branch_selection_bias_used = False
         self.memory.collision_recovery_candidate_injected = False
-        self.memory.productive_window_extension_kept_control = False 
+        self.memory.productive_window_extension_kept_control = False
+        self.memory.structured_persistence_gate_passed = False
+        self.memory.structured_persistence_decay_exit_reason = ""
+        self.memory.structured_persistence_decay_triggered = False
+        self.memory.post_breakthrough_outranked_persistence = False
+        self.memory.control_band_bias_applied = False
+        self.memory.interior_transition_bias_applied = False
+        self.memory.two_anchor_oscillation_breakout_applied = False
+        self.memory.directional_breakout_bias_applied = False
+        self.memory.finish_corridor_bias_applied = False
         self.llm_step_meta = {
             "reasoner_consulted_this_step": False,
             "reasoner_parsed_abduction_this_step": False,
@@ -7452,11 +7704,6 @@ class MetacognitiveController:
             if self.dead.is_dead(signature):
                 self.plan_queue.clear()
                 continue
-            data = queued.data_dict
-            if "x" in data and "y" in data:
-                if self.memory.spatial_visits.get((data["x"], data["y"]), 0) >= 3:
-                    self.plan_queue.clear()
-                    continue
             prediction = self._predict(scene, queued, profile)
             decision = self._verify(
                 scene, queued, legal_names, prediction, prediction is None, profile)
@@ -7764,12 +8011,6 @@ class MetacognitiveController:
                         self.memory.post_breakthrough_window_active = False
                         self.memory.post_breakthrough_aborted_reason = "continuation_fallback_forced"
                         self.post_breakthrough_stuck_mode_uses = 0
-                is_persisting = (self.memory.structured_branch_persistence_used and self.memory.structured_branch_persistence_steps_remaining > 0)
-                is_live_branch = (
-                    self.memory.productive_branch_signature != ""
-                    and self.memory.productive_branch_streak >= 2
-                    and (step - self.memory.productive_branch_last_effective_step) <= 3
-                )
                 if self.memory.post_breakthrough_window_active:
                     self.memory.productive_branch_preempt_blocked = True
                     self.memory.productive_branch_preempt_block_reason = "post_breakthrough_continuation_active"
@@ -7834,7 +8075,17 @@ class MetacognitiveController:
         is_looping = self.memory.recent_state_loop(self.config.loop_window)
         cf_plan = self.counterfactual.plan(
             scene, candidates, legal_names) if profile.use_counterfactual else None
-        if cf_plan is not None:
+        # Check two-anchor oscillation on cf_plan.first_action
+        is_cf_oscillating = False
+        if self.memory.two_anchor_suppression_steps_remaining > 0 and cf_plan and cf_plan.first_action and cf_plan.first_action.data:
+            c_dict = dict(cf_plan.first_action.data)
+            if "x" in c_dict and "y" in c_dict:
+                pt = (c_dict["x"], c_dict["y"])
+                if pt in self.memory.two_anchor_suppressed_anchors:
+                    is_cf_oscillating = True
+                    self.memory.two_anchor_oscillation_breakout_applied = True
+
+        if cf_plan is not None and not is_cf_oscillating and not (self.counterfactual_streak >= 12 and not self.memory.post_breakthrough_window_active and self.memory.current_level_index == 0):
             if cf_plan.prediction is not None and cf_plan.first_action is not None and (self.counterfactual_streak < 15 or profile.use_programs):
                 self.counterfactual_streak += 1
                 self.plan_queue.extend(cf_plan.remaining)
@@ -8392,6 +8643,50 @@ class MetacognitiveController:
 # ---------------------------------------------------------------------------
 
 
+def _is_meaningful_progress(
+    event: Event,
+    scene: Scene,
+    prev_scene: Scene | None,
+    memory: TraceMemory,
+    recent_completion_scores: list[float],
+) -> bool:
+    if event.level_delta > 0 or getattr(event, "state", "") == GameState.WIN or getattr(event, "won", False):
+        return True
+    if getattr(event, "game_over", False) or event.no_op or event.changed_count == 0:
+        return False
+    # Micro recolor flicker: single pixel change without movement, new color, or completion gain is churn
+    if event.changed_count == 1:
+        if len(recent_completion_scores) >= 2 and recent_completion_scores[-1] > recent_completion_scores[-2] + 0.15:
+            return True
+        return False
+    if getattr(event, "entity_moves", None) and len(event.entity_moves) > 0:
+        return True
+    if event.changed_count >= 6:
+        return True
+    if prev_scene is not None:
+        new_colors = set(dict(scene.color_counts).keys()) - set(dict(prev_scene.color_counts).keys())
+        if new_colors:
+            return True
+        if abs(len(scene.components) - len(prev_scene.components)) >= 1:
+            return True
+    if len(recent_completion_scores) >= 2:
+        if recent_completion_scores[-1] > recent_completion_scores[-2] + 0.15:
+            return True
+    if prev_scene is not None and prev_scene.changed_cells and scene.changed_cells:
+        recent_xs = [x for x, y in prev_scene.changed_cells[-10:]]
+        recent_ys = [y for x, y in prev_scene.changed_cells[-10:]]
+        if recent_xs and recent_ys:
+            for cx, cy in scene.changed_cells[-4:]:
+                if cx < min(recent_xs) - 2 or cx > max(recent_xs) + 2 or cy < min(recent_ys) - 2 or cy > max(recent_ys) + 2:
+                    return True
+    # Anchor-relative displacement: change of 2+ cells in productive anchor neighborhood
+    if memory.productive_branch_anchor is not None and scene.changed_cells:
+        ax, ay = memory.productive_branch_anchor
+        if any(abs(cx - ax) <= 4 and abs(cy - ay) <= 4 for cx, cy in scene.changed_cells) and event.changed_count >= 2:
+            return True
+    return False
+
+
 class MyAgent(Agent):
     """DEWMA-ARC v4 agent with level-scoped alignment and global runtime control."""
 
@@ -8620,21 +8915,241 @@ class MyAgent(Agent):
         self.memory.finish_bound_branch_selection_bias_used = False
         self.memory.collision_recovery_candidate_injected = False
         self.memory.productive_window_extension_kept_control = False
+        self.memory.structured_persistence_gate_passed = False
+        self.memory.structured_persistence_decay_exit_reason = ""
+        self.memory.structured_persistence_decay_triggered = False
+        self.memory.post_breakthrough_outranked_persistence = False
         self.memory.record(transition, self.pending_was_probe)
         self.dead.record(self.pending_signature, event)
 
-        # 1. Productive Counterfactual Streak Renewal (Properly scoped to counterfactual stages)
-        pending_stage = str(self.pending_reasoning.get("stage", ""))
-        pending_src = str(self.pending_reasoning.get("final_action_source", ""))
-        is_cf_selected = ("counterfactual" in pending_stage or "counterfactual" in pending_src or (self.pending_action and "counterfactual" in getattr(self.pending_action, "source", "")))
+        # Track recent action coordinates for geometry & oscillation detection
+        if self.pending_action and self.pending_action.data:
+            p_dict = dict(self.pending_action.data)
+            if "x" in p_dict and "y" in p_dict:
+                self.memory.recent_action_coords.append((p_dict["x"], p_dict["y"]))
+                if len(self.memory.recent_action_coords) > 10:
+                    self.memory.recent_action_coords.pop(0)
+
+        # Decrement two-anchor suppression horizon
+        if self.memory.two_anchor_suppression_steps_remaining > 0:
+            self.memory.two_anchor_suppression_steps_remaining -= 1
+            if self.memory.two_anchor_suppression_steps_remaining == 0:
+                self.memory.two_anchor_suppressed_anchors = ()
+
+        # Productive Breakout Branch Seed and Direction Tracking
+        was_breakout = (
+            self.memory.two_anchor_oscillation_breakout_applied
+            or self.memory.small_cycle_suppression_applied
+        )
         if (
-            is_cf_selected
+            was_breakout
             and event.changed_count > 0
             and not event.no_op
             and not event.game_over
+            and self.pending_action
+            and self.pending_action.data
         ):
-            self.controller.counterfactual_streak = 0
-            self.memory.counterfactual_streak_renewed = True
+            p_dict = dict(self.pending_action.data)
+            if "x" in p_dict and "y" in p_dict:
+                curr_pt = (p_dict["x"], p_dict["y"])
+                prev_pt = self.memory.recent_action_coords[-2] if len(self.memory.recent_action_coords) >= 2 else curr_pt
+                dx = curr_pt[0] - prev_pt[0]
+                dy = curr_pt[1] - prev_pt[1]
+                dir_x = (1 if dx > 0 else (-1 if dx < 0 else 0))
+                dir_y = (1 if dy > 0 else (-1 if dy < 0 else 0))
+
+                self.memory.productive_breakout_branch_seed_active = True
+                self.memory.productive_breakout_branch_seed_coord = curr_pt
+                self.memory.productive_breakout_direction = (dir_x, dir_y) if (dir_x != 0 or dir_y != 0) else None
+                self.memory.productive_breakout_branch_seed_family = self.memory.top_mechanism_family or ""
+                self.memory.productive_breakout_branch_seed_steps_remaining = 5
+
+        # Decrement breakout branch seed horizon
+        if self.memory.productive_breakout_branch_seed_active:
+            self.memory.productive_breakout_branch_seed_steps_remaining -= 1
+            if event.level_delta > 0 or self.memory.current_level_index > 0 or event.game_over or self.memory.productive_breakout_branch_seed_steps_remaining <= 0:
+                self.memory.productive_breakout_branch_seed_active = False
+                self.memory.productive_breakout_branch_seed_coord = None
+                self.memory.productive_breakout_direction = None
+                self.memory.productive_breakout_branch_seed_steps_remaining = 0
+
+        # Detect Two-Anchor and Small-Cycle Oscillation (A-B-A-B, A-B-C-A-B-C, tight pocket)
+        self.memory.two_anchor_oscillation_detected = False
+        self.memory.small_cycle_oscillation_detected = False
+        self.memory.small_cycle_suppression_applied = False
+        if (
+            self.memory.current_level_index == 0
+            and not self.memory.post_breakthrough_window_active
+            and len(self.memory.recent_action_coords) >= 4
+        ):
+            c4 = self.memory.recent_action_coords[-4:]
+            if c4[0] == c4[2] and c4[1] == c4[3] and c4[0] != c4[1]:
+                self.memory.two_anchor_oscillation_detected = True
+                self.memory.two_anchor_suppressed_anchors = (c4[0], c4[1])
+                self.memory.two_anchor_suppression_steps_remaining = 2
+            elif len(self.memory.recent_action_coords) >= 6:
+                c6 = self.memory.recent_action_coords[-6:]
+                if c6[0] == c6[2] == c6[4] and c6[1] == c6[3] == c6[5] and c6[0] != c6[1]:
+                    self.memory.two_anchor_oscillation_detected = True
+                    self.memory.two_anchor_suppressed_anchors = (c6[0], c6[1])
+                    self.memory.two_anchor_suppression_steps_remaining = 2
+                elif c6[0] == c6[3] and c6[1] == c6[4] and c6[2] == c6[5] and len(set(c6[:3])) == 3:
+                    # 3-Anchor small cycle: A-B-C-A-B-C
+                    self.memory.small_cycle_oscillation_detected = True
+                    self.memory.small_cycle_suppression_applied = True
+                    self.memory.two_anchor_suppressed_anchors = tuple(set(c6))
+                    self.memory.two_anchor_suppression_steps_remaining = 2
+                else:
+                    # Tight pocket ping-pong: all 6 coordinates in radius <= 2
+                    xs = [x for x, y in c6]
+                    ys = [y for x, y in c6]
+                    if (max(xs) - min(xs) <= 2) and (max(ys) - min(ys) <= 2) and len(set(c6)) <= 3:
+                        self.memory.small_cycle_oscillation_detected = True
+                        self.memory.small_cycle_suppression_applied = True
+                        self.memory.two_anchor_suppressed_anchors = tuple(set(c6))
+                        self.memory.two_anchor_suppression_steps_remaining = 2
+
+        # Detect Control-Band Saturation
+        self.memory.control_band_saturation_detected = False
+        self.memory.control_band_orientation = ""
+        if (
+            self.memory.current_level_index == 0
+            and not self.memory.post_breakthrough_window_active
+            and len(self.memory.recent_action_coords) >= 4
+            and len(self.memory.transitions) >= 6
+        ):
+            coords = self.memory.recent_action_coords[-6:]
+            w, h = scene.width, scene.height
+            top_count = sum(1 for (x, y) in coords if y <= 3)
+            bottom_count = sum(1 for (x, y) in coords if y >= h - 4)
+            left_count = sum(1 for (x, y) in coords if x <= 3)
+            right_count = sum(1 for (x, y) in coords if x >= w - 4)
+
+            ys = [y for (x, y) in coords]
+            xs = [x for (x, y) in coords]
+            y_span = max(ys) - min(ys)
+            x_span = max(xs) - min(xs)
+
+            recent_scores = self.memory.recent_completion_scores[-4:]
+            stagnant_completion = len(recent_scores) < 2 or (recent_scores[-1] <= recent_scores[0])
+
+            if stagnant_completion:
+                if top_count >= 4:
+                    self.memory.control_band_saturation_detected = True
+                    self.memory.control_band_orientation = "horizontal_top"
+                elif bottom_count >= 4:
+                    self.memory.control_band_saturation_detected = True
+                    self.memory.control_band_orientation = "horizontal_bottom"
+                elif left_count >= 4:
+                    self.memory.control_band_saturation_detected = True
+                    self.memory.control_band_orientation = "vertical_left"
+                elif right_count >= 4:
+                    self.memory.control_band_saturation_detected = True
+                    self.memory.control_band_orientation = "vertical_right"
+                elif len(coords) >= 5 and y_span <= 2:
+                    self.memory.control_band_saturation_detected = True
+                    self.memory.control_band_orientation = "horizontal_slice"
+                elif len(coords) >= 5 and x_span <= 2:
+                    self.memory.control_band_saturation_detected = True
+                    self.memory.control_band_orientation = "vertical_slice"
+
+        # Manage Control-Band Setup Budget and Interior Application Phase
+        if self.memory.current_level_index == 0 and not self.memory.post_breakthrough_window_active:
+            if self.memory.control_band_saturation_detected:
+                self.memory.control_band_saturation_streak += 1
+                if self.pending_action and self.pending_action.data:
+                    p_dict = dict(self.pending_action.data)
+                    if "x" in p_dict and "y" in p_dict:
+                        cx, cy = p_dict["x"], p_dict["y"]
+                        band = self.memory.control_band_orientation
+                        is_in_band = (
+                            (band == "horizontal_top" and cy <= 3)
+                            or (band == "horizontal_bottom" and cy >= scene.height - 4)
+                            or (band == "vertical_left" and cx <= 3)
+                            or (band == "vertical_right" and cx >= scene.width - 4)
+                            or (band in ("horizontal_slice", "vertical_slice"))
+                        )
+                        if is_in_band:
+                            self.memory.control_band_setup_budget_remaining = max(0, self.memory.control_band_setup_budget_remaining - 1)
+
+                if (self.memory.control_band_setup_budget_remaining <= 0 or self.memory.control_band_saturation_streak >= 2) and not self.memory.interior_application_phase_active:
+                    self.memory.interior_application_phase_active = True
+                    self.memory.interior_exploitation_window_steps_remaining = 10
+            else:
+                self.memory.control_band_saturation_streak = max(0, self.memory.control_band_saturation_streak - 1)
+
+            if self.memory.interior_application_phase_active:
+                self.memory.interior_exploitation_window_steps_remaining -= 1
+                if event.level_delta > 0 or self.memory.current_level_index > 0:
+                    self.memory.interior_application_phase_active = False
+                    self.memory.interior_exploitation_window_steps_remaining = 0
+                    self.memory.control_band_setup_budget_remaining = 4
+                elif self.memory.no_op_streak >= 4 or self.memory.interior_exploitation_window_steps_remaining <= 0:
+                    self.memory.interior_application_phase_active = False
+                    self.memory.interior_exploitation_window_steps_remaining = 0
+                    self.memory.control_band_setup_budget_remaining = 4
+
+        # 1. Productive Counterfactual Streak Renewal (Gated by real meaningful progress)
+        pending_stage = str(self.pending_reasoning.get("stage", ""))
+        pending_src = str(self.pending_reasoning.get("final_action_source", ""))
+        is_cf_selected = ("counterfactual" in pending_stage or "counterfactual" in pending_src or (self.pending_action and "counterfactual" in getattr(self.pending_action, "source", "")))
+
+        is_meaningful = _is_meaningful_progress(
+            event, scene, self.pending_scene, self.memory, self.memory.recent_completion_scores
+        )
+        if is_meaningful:
+            self.memory.meaningful_progress_streak += 1
+            self.memory.meaningful_progress_detected = True
+            self.memory.micro_change_churn_detected = False
+        else:
+            self.memory.meaningful_progress_streak = 0
+            self.memory.meaningful_progress_detected = False
+            self.memory.micro_change_churn_detected = True
+
+        if is_cf_selected:
+            if is_meaningful:
+                self.controller.counterfactual_streak = 0
+                self.memory.counterfactual_streak_renewed = True
+            else:
+                # Micro-change churn increments counterfactual failure streak rather than resetting it
+                self.controller.counterfactual_streak += 1
+
+        # Trigger Finish-Corridor Mode upon coherent sequence of meaningful progress
+        if self.memory.current_level_index == 0 and not self.memory.post_breakthrough_window_active:
+            is_coherent_corridor = False
+            if self.memory.meaningful_progress_streak >= 3:
+                is_coherent_corridor = True
+            elif self.memory.productive_breakout_branch_seed_active and is_meaningful and self.memory.meaningful_progress_streak >= 2:
+                is_coherent_corridor = True
+            elif self.memory.productive_branch_streak >= 3 and is_meaningful:
+                is_coherent_corridor = True
+
+            if is_coherent_corridor and not self.memory.finish_corridor_active:
+                self.memory.finish_corridor_active = True
+                self.memory.finish_corridor_steps_remaining = 6
+                self.memory.finish_corridor_anchor = self.memory.productive_breakout_branch_seed_coord or self.memory.productive_branch_anchor
+                self.memory.finish_corridor_family = self.memory.top_mechanism_family or ""
+                self.memory.finish_corridor_exit_reason = ""
+
+        # Manage Finish-Corridor lifecycle
+        if self.memory.finish_corridor_active:
+            self.memory.finish_corridor_steps_remaining -= 1
+            if event.level_delta > 0 or self.memory.current_level_index > 0:
+                self.memory.finish_corridor_active = False
+                self.memory.finish_corridor_steps_remaining = 0
+                self.memory.finish_corridor_exit_reason = "level_cleared"
+            elif event.no_op and self.memory.finish_mode_noop_streak >= 2:
+                self.memory.finish_corridor_active = False
+                self.memory.finish_corridor_steps_remaining = 0
+                self.memory.finish_corridor_exit_reason = "corridor_noop"
+            elif getattr(event, "game_over", False):
+                self.memory.finish_corridor_active = False
+                self.memory.finish_corridor_steps_remaining = 0
+                self.memory.finish_corridor_exit_reason = "fatal_collision"
+            elif self.memory.finish_corridor_steps_remaining <= 0:
+                self.memory.finish_corridor_active = False
+                self.memory.finish_corridor_steps_remaining = 0
+                self.memory.finish_corridor_exit_reason = "window_expired" 
 
         # Continuation Failure Accounting
         if self.memory.post_breakthrough_window_active:
@@ -8763,10 +9278,10 @@ class MyAgent(Agent):
                 if self.memory.no_op_streak >= 2:
                     self.memory.productive_branch_streak = 0
 
-            # 4. Structured Branch Persistence: activate and hold control for 6 steps
+            # 4. Structured Branch Persistence: Narrow initial window (2-3 steps on Level 0) with evidence-backed extension & early decay
             has_completion_signal = (
-                self.memory.productive_search_convergence_pressure >= 0.5
-                or self.memory.counterfactual_completion_bias > 0.0
+                self.memory.productive_search_convergence_pressure >= 1.0
+                or self.memory.counterfactual_completion_bias >= 1.0
                 or self.memory.consecutive_completion_signals >= 1
             )
             if (
@@ -8776,19 +9291,46 @@ class MyAgent(Agent):
                 and not event.game_over
                 and has_completion_signal
             ):
+                if not self.memory.structured_branch_persistence_used:
+                    self.memory.structured_branch_persistence_steps = 0
                 self.memory.structured_branch_persistence_used = True
                 self.memory.structured_branch_persistence_steps += 1
-                self.memory.structured_branch_persistence_steps_remaining = max(1, 6 - self.memory.structured_branch_persistence_steps)
+                # Level 0 window is strictly 3 steps unless renewed by continuous evidence
+                max_persist_window = 3 if self.memory.current_level_index == 0 else 6
+                self.memory.structured_branch_persistence_steps_remaining = max(1, max_persist_window - self.memory.structured_branch_persistence_steps)
                 self.memory.structured_branch_persistence_break_reason = ""
             elif self.memory.structured_branch_persistence_used:
-                if event.no_op and self.memory.finish_mode_noop_streak >= 2:
+                # Early persistence decay rule: if no progress, no rising completion, and no anchor-local non-noop change over 2 steps, aggressively decay
+                recent_scores = self.memory.recent_completion_scores[-3:]
+                is_improving = len(recent_scores) >= 2 and (recent_scores[-1] > recent_scores[0])
+                is_anchor_local = False
+                if self.memory.productive_branch_anchor and self.pending_action and self.pending_action.data:
+                    px, py = dict(self.pending_action.data).get("x", -999), dict(self.pending_action.data).get("y", -999)
+                    ax, ay = self.memory.productive_branch_anchor
+                    if max(abs(px - ax), abs(py - ay)) <= 3 and event.changed_count > 0 and not event.no_op:
+                        is_anchor_local = True
+
+                if not is_improving and not is_anchor_local and self.memory.structured_branch_persistence_steps >= 2:
                     self.memory.structured_branch_persistence_used = False
+                    self.memory.structured_branch_persistence_steps = 0
+                    self.memory.structured_branch_persistence_steps_remaining = 0
+                    self.memory.structured_persistence_decay_triggered = True
+                    self.memory.structured_persistence_decay_exit_reason = "no_evidence_or_convergence_decay"
+                    self.memory.structured_branch_persistence_break_reason = "evidence_decay"
+                elif event.no_op and self.memory.finish_mode_noop_streak >= 2:
+                    self.memory.structured_branch_persistence_used = False
+                    self.memory.structured_branch_persistence_steps = 0
+                    self.memory.structured_branch_persistence_steps_remaining = 0
                     self.memory.structured_branch_persistence_break_reason = "repeated_noop"
                 elif event.game_over:
                     self.memory.structured_branch_persistence_used = False
+                    self.memory.structured_branch_persistence_steps = 0
+                    self.memory.structured_branch_persistence_steps_remaining = 0
                     self.memory.structured_branch_persistence_break_reason = "game_over"
-                elif self.memory.structured_branch_persistence_steps >= 6:
+                elif self.memory.structured_branch_persistence_steps >= 3:
                     self.memory.structured_branch_persistence_used = False
+                    self.memory.structured_branch_persistence_steps = 0
+                    self.memory.structured_branch_persistence_steps_remaining = 0
                     self.memory.structured_branch_persistence_break_reason = "window_expired"
 
             # Check Finish Mode Entry Criteria with Selective Gating & Concrete Branch Binding
@@ -8899,21 +9441,11 @@ class MyAgent(Agent):
         else:
             self.memory.coord_cycle_clicks_remaining = max(0, self.memory.coord_cycle_clicks_remaining - 1)
 
-        # 3. Systematic Sequential Component Sweep click decrement and anti-stall
-        if self.pending_action and self.pending_action.data:
-            p_dict = dict(self.pending_action.data)
-            if "x" in p_dict and "y" in p_dict:
-                px, py = p_dict["x"], p_dict["y"]
-                if self.memory.spatial_visits.get((px, py), 0) >= 2 or event.no_op:
-                    self.memory.visited_sweep_component_anchors.add((px, py))
+        # 3. Systematic Sequential Component Sweep click decrement
         if self.memory.active_sweep_clicks_remaining > 0:
-            if event.no_op or event.changed_count == 0:
-                self.memory.active_sweep_clicks_remaining = 0
+            self.memory.active_sweep_clicks_remaining -= 1
+            if self.memory.active_sweep_clicks_remaining <= 0:
                 self.memory.active_sweep_component_id = None
-            else:
-                self.memory.active_sweep_clicks_remaining -= 1
-                if self.memory.active_sweep_clicks_remaining <= 0:
-                    self.memory.active_sweep_component_id = None
 
         # 4. Atomic Two-Phase Drag/Drop Pairing (ACTION6 -> ACTION7) in drag_or_push / movement_control
         if (
@@ -9028,9 +9560,7 @@ class MyAgent(Agent):
         if self.pending_reasoning.get("final_action_source") in ("milestone_model_verified", "milestone_model_goal_verified", "llm_program", "llm_follow_through", "counterfactual_program"):
             if not event.no_op and not event.game_over:
                 fam = self.pending_reasoning.get("llm_family") or self.memory.llm_recent_committed_family or "translation"
-                p_dict = dict(self.pending_action.data) if self.pending_action and self.pending_action.data else {}
-                is_palette_button = "y" in p_dict and p_dict["y"] <= 2
-                if not is_palette_button and fam in ("translation", "component_recolor") and len(self.memory.macro_replay_queue) == 0:
+                if fam in ("translation", "component_recolor") and len(self.memory.macro_replay_queue) == 0:
                     for _ in range(2):
                         self.memory.macro_replay_queue.append(self.pending_action)
                     self.memory.macro_replay_family = fam
@@ -9274,6 +9804,36 @@ class MyAgent(Agent):
             finish_bound_branch_selection_bias_used=bool(self.memory.finish_bound_branch_selection_bias_used),
             collision_recovery_candidate_injected=bool(self.memory.collision_recovery_candidate_injected),
             productive_window_extension_kept_control=bool(self.memory.productive_window_extension_kept_control),
+            structured_persistence_gate_passed=bool(self.memory.structured_persistence_gate_passed),
+            structured_persistence_decay_exit_reason=str(self.memory.structured_persistence_decay_exit_reason),
+            structured_persistence_decay_triggered=bool(self.memory.structured_persistence_decay_triggered),
+            post_breakthrough_outranked_persistence=bool(self.memory.post_breakthrough_outranked_persistence),
+            control_band_saturation_detected=bool(self.memory.control_band_saturation_detected),
+            control_band_orientation=str(self.memory.control_band_orientation),
+            control_band_bias_applied=bool(self.memory.control_band_bias_applied),
+            interior_transition_bias_applied=bool(self.memory.interior_transition_bias_applied),
+            two_anchor_oscillation_detected=bool(self.memory.two_anchor_oscillation_detected),
+            two_anchor_oscillation_breakout_applied=bool(self.memory.two_anchor_oscillation_breakout_applied),
+            two_anchor_suppressed_anchors=list(self.memory.two_anchor_suppressed_anchors),
+            two_anchor_suppression_steps_remaining=int(self.memory.two_anchor_suppression_steps_remaining),
+            interior_exploitation_window_active=bool(self.memory.interior_exploitation_window_active),
+            interior_exploitation_window_steps_remaining=int(self.memory.interior_exploitation_window_steps_remaining),
+            productive_breakout_branch_seed_active=bool(self.memory.productive_breakout_branch_seed_active),
+            productive_breakout_branch_seed_coord=self.memory.productive_breakout_branch_seed_coord,
+            small_cycle_oscillation_detected=bool(self.memory.small_cycle_oscillation_detected),
+            small_cycle_suppression_applied=bool(self.memory.small_cycle_suppression_applied),
+            meaningful_progress_detected=bool(self.memory.meaningful_progress_detected),
+            micro_change_churn_detected=bool(self.memory.micro_change_churn_detected),
+            control_band_setup_budget_remaining=int(self.memory.control_band_setup_budget_remaining),
+            interior_application_phase_active=bool(self.memory.interior_application_phase_active),
+            productive_breakout_direction=self.memory.productive_breakout_direction,
+            directional_breakout_bias_applied=bool(self.memory.directional_breakout_bias_applied),
+            finish_corridor_active=bool(self.memory.finish_corridor_active),
+            finish_corridor_steps_remaining=int(self.memory.finish_corridor_steps_remaining),
+            finish_corridor_anchor=self.memory.finish_corridor_anchor,
+            finish_corridor_family=str(self.memory.finish_corridor_family),
+            finish_corridor_bias_applied=bool(self.memory.finish_corridor_bias_applied),
+            finish_corridor_exit_reason=str(self.memory.finish_corridor_exit_reason),
             regrounded_winning_coords=self.memory.regrounded_winning_coords,
             regrounding_delta=self.memory.regrounding_delta,
             regrounding_confidence=float(self.memory.regrounding_confidence),

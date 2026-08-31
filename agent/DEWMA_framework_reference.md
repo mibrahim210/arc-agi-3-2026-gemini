@@ -67,6 +67,7 @@ The policy is composed from several interacting predictive layers:
 - goal alignment verifier
 - bounded counterfactual search
 - promising-state deep search
+- finish-corridor continuation bias
 
 ### 2.5 Runtime-Adaptive Cognition
 
@@ -116,6 +117,10 @@ The agent distinguishes between:
 - mechanism beliefs and shift events
 - winning pattern transfer state
 - post-breakthrough exploitation windows
+- control-band saturation and setup-budget state
+- oscillation suppression pockets and breakout seeds
+- meaningful-progress vs micro-churn telemetry
+- finish-corridor activation and exit reasons
 
 ### 4.3 Goal Hypothesis Manager
 
@@ -191,6 +196,13 @@ This bridges low-level probing and higher-level planning.
 
 The bounded counterfactual planner searches short verified futures using executable programs and goal alignment. It remains a core deterministic planner and is used before generic fallback.
 
+In the current implementation it is also shaped by anti-churn conversion logic:
+
+- micro-change churn should not automatically renew counterfactual persistence
+- productive breakout seeds can bias nearby continuation
+- small-cycle suppression can temporarily block recently oscillating pockets
+- finish-corridor mode can temporarily prefer same-neighborhood continuation over lateral branch drift
+
 ### 4.8 Optional Local Reasoner
 
 The LLM layer acts primarily as a **bounded abductive assistant**, not as a free-running policy.
@@ -264,6 +276,40 @@ On the next level transition, this can activate a **post-breakthrough exploitati
 
 This is a temporary high-confidence exploitation overlay, not a permanent lock-in.
 
+### 4.12 Control-Band and Interior-Application Phasing
+
+The current code includes a generic phase transition for puzzles that appear to require interaction with a control strip or border band before applying effects inside the main canvas.
+
+When repeated actions saturate a top/bottom/left/right band or a thin horizontal/vertical slice without level progress, the agent can:
+
+- detect `control_band_saturation`
+- decrement a temporary `control_band_setup_budget`
+- activate an `interior_application_phase`
+- strongly suppress repeated band actions during that phase
+- bias toward low-visit interior component targets
+
+This mechanism is generic and based on geometry plus progress evidence, not on game IDs.
+
+### 4.13 Oscillation Breakout and Finish-Corridor Conversion
+
+The current implementation contains a multi-stage generic anti-loop conversion layer.
+
+First, it detects and suppresses:
+
+- exact two-anchor alternation such as `A-B-A-B`
+- longer two-anchor repetition such as `A-B-A-B-A-B`
+- three-anchor small cycles such as `A-B-C-A-B-C`
+- tight local pocket churn
+
+Then, if a breakout from that suppressed pocket produces real progress, it can:
+
+- store a short-lived productive breakout seed
+- keep a local directional hint when one is available
+- distinguish `meaningful_progress_detected` from `micro_change_churn_detected`
+- activate a temporary `finish_corridor_active` mode after coherent repeated progress
+
+Finish-corridor mode is the current bridge between “escaping a loop” and “actually converting the productive branch into a level clear.”
+
 ## 5. Current Decision Ladder
 
 The effective metacognitive order in the current implementation is:
@@ -275,14 +321,15 @@ The effective metacognitive order in the current implementation is:
 5. LLM follow-through continuation window
 6. evidence-guided novelty exploration when strongly stuck
 7. forced structural probe on family-collapse boredom
-8. bounded counterfactual planning
+8. bounded counterfactual planning with anti-churn gating
 9. deterministic path planning
 10. replay/hash/hypothesis arbitration
 11. promising-state bounded deep search
-12. milestone-gated local reasoner
-13. physical discriminating probes
-14. alignment-constrained fallback
-15. fail-closed reset / legal fallback
+12. finish-corridor and productive-branch continuation bias
+13. milestone-gated local reasoner
+14. physical discriminating probes
+15. alignment-constrained fallback
+16. fail-closed reset / legal fallback
 
 This ladder is intentionally biased toward cheap verified behavior first, then bounded planning, then model assistance, then safe fallback.
 
@@ -327,6 +374,13 @@ The current code contains several anti-collapse layers:
 - post-breakthrough contradiction aborts
 - caps on post-breakthrough `stuck_mode_exploration`
 - caps on post-breakthrough alignment fallback churn
+- control-band setup budgeting
+- interior-application phase forcing
+- two-anchor oscillation suppression
+- small-cycle suppression
+- productive breakout seed continuation
+- meaningful-progress vs micro-churn separation
+- finish-corridor continuation with explicit exit reasons
 
 This is especially important because many ARC-AGI-3 failures are not instant mistakes but long low-value loops.
 
@@ -380,6 +434,30 @@ Important fields in the current implementation include:
 - `transferred_winning_coords`
 - `post_breakthrough_aborted_reason`
 - `post_breakthrough_bias_used`
+- `control_band_saturation_detected`
+- `control_band_orientation`
+- `control_band_setup_budget_remaining`
+- `interior_application_phase_active`
+- `interior_exploitation_window_active`
+- `control_band_bias_applied`
+- `interior_transition_bias_applied`
+- `two_anchor_oscillation_detected`
+- `two_anchor_oscillation_breakout_applied`
+- `two_anchor_suppressed_anchors`
+- `small_cycle_oscillation_detected`
+- `small_cycle_suppression_applied`
+- `productive_breakout_branch_seed_active`
+- `productive_breakout_branch_seed_coord`
+- `productive_breakout_direction`
+- `directional_breakout_bias_applied`
+- `meaningful_progress_detected`
+- `micro_change_churn_detected`
+- `finish_corridor_active`
+- `finish_corridor_steps_remaining`
+- `finish_corridor_anchor`
+- `finish_corridor_family`
+- `finish_corridor_bias_applied`
+- `finish_corridor_exit_reason`
 
 ### 9.2 LLM Forensics
 
@@ -421,7 +499,7 @@ These logs are intended to remain append-only during Kaggle runs.
 
 So the best description of the current code is:
 
-**a generic interactive reasoning framework with strong structured priors and bounded post-breakthrough exploitation.**
+**a generic interactive reasoning framework with strong structured priors, bounded post-breakthrough exploitation, and explicit anti-churn conversion layers.**
 
 ## 11. Current Strengths
 
@@ -433,6 +511,8 @@ So the best description of the current code is:
 - Kaggle-safe runtime hardening is strong
 - traces are rich enough for real forensic debugging
 - post-breakthrough exploitation now exists as a first-class policy layer
+- control-band to interior phasing is now an explicit generic mechanism
+- oscillation breakout can now be converted into short-lived finish-corridor commitment
 
 ## 12. Current Weaknesses
 
@@ -441,6 +521,8 @@ So the best description of the current code is:
 - the agent can still spend many actions in fallback churn
 - LLM proposals remain filtered heavily and may contribute unevenly
 - post-breakthrough bias attribution is still easier to trace than to optimize
+- meaningful-progress calibration is still delicate and can over- or under-hold a local branch
+- finish-corridor continuation is still short-horizon and may miss longer hidden-task solution chains
 - hidden-game generalization remains the open problem, not notebook plumbing
 
 ## 13. How To Update This File
@@ -454,6 +536,7 @@ Update this file whenever any of the following change in `agent/my_agent.py`:
 - runtime tier behavior
 - deep-search policy
 - post-breakthrough transfer/exploitation behavior
+- control-band / oscillation / finish-corridor conversion behavior
 - trace schema
 - forensic log behavior
 

@@ -14,8 +14,10 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import logging
+import os
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -70,6 +72,28 @@ def play_one_game(MyAgentCls, arc, game_id: str, render_mode: str | None):
     )
 
 
+def write_run_summary(trace_dir: str, per_game, score_val) -> None:
+    path = Path(trace_dir) / "summary.md"
+    progressed = [gid for gid, _state, levels, _actions in per_game if levels > 0]
+    lines = [
+        "# Local Run Summary",
+        "",
+        f"- Date: {datetime.now().isoformat(timespec='seconds')}",
+        f"- Aggregate scorecard score: {score_val}",
+        f"- Games run: {len(per_game)}",
+        f"- Games with progress: {len(progressed)}",
+        f"- Progressed games: {', '.join(progressed) if progressed else 'None'}",
+        "",
+        "## Per-game Results",
+        "",
+        "| Game | Levels | Actions | State |",
+        "| --- | ---: | ---: | --- |",
+    ]
+    for gid, state, levels, actions in sorted(per_game, key=lambda row: row[0]):
+        lines.append(f"| {gid} | {levels} | {actions} | {state} |")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--game", default=None,
@@ -88,6 +112,18 @@ def main() -> None:
     args = p.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
+
+    # Preserve every benchmark run by default. Individual trace shards and
+    # llm_forensics logs will be written under a timestamped archive folder
+    # unless the caller explicitly overrides DEWMA_TRACE_DIR.
+    trace_dir = os.environ.get("DEWMA_TRACE_DIR", "").strip()
+    if not trace_dir:
+        run_stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        trace_root = ROOT / "traces_archive" / run_stamp
+        trace_root.mkdir(parents=True, exist_ok=True)
+        os.environ["DEWMA_TRACE_DIR"] = str(trace_root)
+        trace_dir = str(trace_root)
+    print(f"Trace output directory: {trace_dir}\n")
 
     # NORMAL = local execution; game source is downloaded on first call into
     # ./environment_files/ and cached for subsequent runs.
@@ -148,6 +184,8 @@ def main() -> None:
         print(f"  {gid:8} levels={levels:3}  actions={actions:5}  state={state}")
     score_val = sc.score if hasattr(sc, "score") else sc
     print(f"\nAggregate scorecard score: {score_val}")
+    write_run_summary(trace_dir, per_game, score_val)
+    print(f"Run summary written to: {Path(trace_dir) / 'summary.md'}")
 
 
 if __name__ == "__main__":
