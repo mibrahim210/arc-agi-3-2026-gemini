@@ -765,6 +765,8 @@ class DiagnosticTraceRecord:
     finish_corridor_family: str = ""
     finish_corridor_bias_applied: bool = False
     finish_corridor_exit_reason: str = ""
+    dense_local_recolor_continuity_active: bool = False
+    control_band_border_confirmed: bool = False
 
 
 @dataclass(slots=True)
@@ -2210,6 +2212,8 @@ class TraceMemory:
         self.finish_corridor_family: str = ""
         self.finish_corridor_bias_applied: bool = False
         self.finish_corridor_exit_reason: str = ""
+        self.dense_local_recolor_continuity_active: bool = False
+        self.control_band_border_confirmed: bool = False
         self.meaningful_progress_streak: int = 0
         self.structured_branch_persistence_selection_bias_used: bool = False
         self.productive_branch_signature_reused_by_neighborhood: bool = False
@@ -2356,6 +2360,8 @@ class TraceMemory:
         self.finish_corridor_family = ""
         self.finish_corridor_bias_applied = False
         self.finish_corridor_exit_reason = ""
+        self.dense_local_recolor_continuity_active = False
+        self.control_band_border_confirmed = False
         self.meaningful_progress_streak = 0
         self.structured_persistence_gate_passed = False
         self.structured_persistence_decay_exit_reason = ""
@@ -6109,8 +6115,8 @@ class CandidateGenerator:
                 for cell in active_comp.cells[:3]:
                     proposals.append((2.3 - 0.10 * self.coordinate_visits[cell], cell, "sequential_sweep_cell"))
 
-        # Interior transition proposals away from saturated control band / during interior exploitation window
-        if (self.memory.control_band_saturation_detected or self.memory.interior_exploitation_window_active or self.memory.interior_application_phase_active) and scene.components:
+        # Interior transition proposals away from saturated border control band
+        if self.memory.control_band_border_confirmed and (self.memory.control_band_saturation_detected or self.memory.interior_exploitation_window_active or self.memory.interior_application_phase_active) and scene.components:
             band = self.memory.control_band_orientation
             boost = 4.0 if self.memory.interior_application_phase_active else (3.2 if self.memory.interior_exploitation_window_active else 2.8)
             for comp in scene.components:
@@ -6121,7 +6127,6 @@ class CandidateGenerator:
                         or (band == "horizontal_bottom" and cy <= scene.height - 6)
                         or (band == "vertical_left" and cx >= 5)
                         or (band == "vertical_right" and cx <= scene.width - 6)
-                        or (band in ("horizontal_slice", "vertical_slice"))
                     )
                     if is_interior and 0 <= cx < scene.width and 0 <= cy < scene.height:
                         proposals.append((boost - 0.15 * self.coordinate_visits[(cx, cy)], (cx, cy), "interior_transition_after_band_saturation"))
@@ -7508,8 +7513,8 @@ class MetacognitiveController:
                 self.memory.finish_bound_branch_selection_bias_used = True
                 self.memory.finish_branch_continuation_kept_control = True
 
-        # 4. Control-Band Saturation and Interior Application Phase Biases
-        if (self.memory.control_band_saturation_detected or self.memory.interior_exploitation_window_active or self.memory.interior_application_phase_active) and candidate.spec.data:
+        # 4. Control-Band Saturation and Interior Application Phase Biases (Gated on true border confirmation)
+        if self.memory.control_band_border_confirmed and (self.memory.control_band_saturation_detected or self.memory.interior_exploitation_window_active or self.memory.interior_application_phase_active) and candidate.spec.data:
             c_dict = dict(candidate.spec.data)
             if "x" in c_dict and "y" in c_dict:
                 cx, cy = c_dict["x"], c_dict["y"]
@@ -7519,8 +7524,6 @@ class MetacognitiveController:
                     or (band == "horizontal_bottom" and cy >= scene.height - 4)
                     or (band == "vertical_left" and cx <= 3)
                     or (band == "vertical_right" and cx >= scene.width - 4)
-                    or (band == "horizontal_slice" and any(abs(cy - y0) <= 2 for _, y0 in self.memory.recent_action_coords[-6:]))
-                    or (band == "vertical_slice" and any(abs(cx - x0) <= 2 for x0, _ in self.memory.recent_action_coords[-6:]))
                 )
                 if is_in_band:
                     penalty = 6.0 if self.memory.interior_application_phase_active else (3.5 if self.memory.interior_exploitation_window_active else 1.5)
@@ -7532,7 +7535,6 @@ class MetacognitiveController:
                         or (band == "horizontal_bottom" and cy <= scene.height - 6)
                         or (band == "vertical_left" and cx >= 5)
                         or (band == "vertical_right" and cx <= scene.width - 6)
-                        or (band in ("horizontal_slice", "vertical_slice"))
                     )
                     if is_interior:
                         boost = 3.5 if self.memory.interior_application_phase_active else (2.5 if self.memory.interior_exploitation_window_active else 1.5)
@@ -7551,8 +7553,6 @@ class MetacognitiveController:
                     if dist <= 3:
                         score += 3.5 - 0.4 * dist
                         self.memory.finish_corridor_bias_applied = True
-                    elif dist > 6:
-                        score -= 3.5
                 p_kind = getattr(prediction, "kind", "") if prediction else ""
                 if self.memory.finish_corridor_family and (p_kind == self.memory.finish_corridor_family or candidate.spec.name == self.memory.productive_branch_action_name):
                     score += 2.0
@@ -9037,25 +9037,31 @@ class MyAgent(Agent):
                 if top_count >= 4:
                     self.memory.control_band_saturation_detected = True
                     self.memory.control_band_orientation = "horizontal_top"
+                    self.memory.control_band_border_confirmed = True
                 elif bottom_count >= 4:
                     self.memory.control_band_saturation_detected = True
                     self.memory.control_band_orientation = "horizontal_bottom"
+                    self.memory.control_band_border_confirmed = True
                 elif left_count >= 4:
                     self.memory.control_band_saturation_detected = True
                     self.memory.control_band_orientation = "vertical_left"
+                    self.memory.control_band_border_confirmed = True
                 elif right_count >= 4:
                     self.memory.control_band_saturation_detected = True
                     self.memory.control_band_orientation = "vertical_right"
-                elif len(coords) >= 5 and y_span <= 2:
+                    self.memory.control_band_border_confirmed = True
+                elif len(coords) >= 5 and y_span <= 2 and (min(ys) <= 3 or max(ys) >= h - 4):
                     self.memory.control_band_saturation_detected = True
-                    self.memory.control_band_orientation = "horizontal_slice"
-                elif len(coords) >= 5 and x_span <= 2:
+                    self.memory.control_band_orientation = "horizontal_top" if min(ys) <= 3 else "horizontal_bottom"
+                    self.memory.control_band_border_confirmed = True
+                elif len(coords) >= 5 and x_span <= 2 and (min(xs) <= 3 or max(xs) >= w - 4):
                     self.memory.control_band_saturation_detected = True
-                    self.memory.control_band_orientation = "vertical_slice"
+                    self.memory.control_band_orientation = "vertical_left" if min(xs) <= 3 else "vertical_right"
+                    self.memory.control_band_border_confirmed = True
 
-        # Manage Control-Band Setup Budget and Interior Application Phase
+        # Manage Control-Band Setup Budget and Interior Application Phase (Gated on true border confirmation)
         if self.memory.current_level_index == 0 and not self.memory.post_breakthrough_window_active:
-            if self.memory.control_band_saturation_detected:
+            if self.memory.control_band_saturation_detected and self.memory.control_band_border_confirmed:
                 self.memory.control_band_saturation_streak += 1
                 if self.pending_action and self.pending_action.data:
                     p_dict = dict(self.pending_action.data)
@@ -9106,8 +9112,19 @@ class MyAgent(Agent):
             self.memory.meaningful_progress_detected = False
             self.memory.micro_change_churn_detected = True
 
+        # Dense local recolor continuity protection
+        self.memory.dense_local_recolor_continuity_active = False
+        top_fam = self.memory.top_mechanism_family or ""
+        is_recolor_fam = top_fam in ("targeted_recolor", "component_recolor", "recolor")
+        if is_recolor_fam and len(self.memory.recent_action_coords) >= 3 and not event.no_op and event.changed_count > 0:
+            c3 = self.memory.recent_action_coords[-3:]
+            xs3 = [x for x, y in c3]
+            ys3 = [y for x, y in c3]
+            if (max(xs3) - min(xs3) <= 4) and (max(ys3) - min(ys3) <= 4):
+                self.memory.dense_local_recolor_continuity_active = True
+
         if is_cf_selected:
-            if is_meaningful:
+            if is_meaningful or self.memory.dense_local_recolor_continuity_active:
                 self.controller.counterfactual_streak = 0
                 self.memory.counterfactual_streak_renewed = True
             else:
@@ -9131,9 +9148,13 @@ class MyAgent(Agent):
                 self.memory.finish_corridor_family = self.memory.top_mechanism_family or ""
                 self.memory.finish_corridor_exit_reason = ""
 
-        # Manage Finish-Corridor lifecycle
+        # Manage Finish-Corridor lifecycle with live support requirement
         if self.memory.finish_corridor_active:
-            self.memory.finish_corridor_steps_remaining -= 1
+            if self.memory.micro_change_churn_detected or event.no_op:
+                self.memory.finish_corridor_steps_remaining -= 2
+            else:
+                self.memory.finish_corridor_steps_remaining -= 1
+
             if event.level_delta > 0 or self.memory.current_level_index > 0:
                 self.memory.finish_corridor_active = False
                 self.memory.finish_corridor_steps_remaining = 0
@@ -9834,6 +9855,8 @@ class MyAgent(Agent):
             finish_corridor_family=str(self.memory.finish_corridor_family),
             finish_corridor_bias_applied=bool(self.memory.finish_corridor_bias_applied),
             finish_corridor_exit_reason=str(self.memory.finish_corridor_exit_reason),
+            dense_local_recolor_continuity_active=bool(self.memory.dense_local_recolor_continuity_active),
+            control_band_border_confirmed=bool(self.memory.control_band_border_confirmed),
             regrounded_winning_coords=self.memory.regrounded_winning_coords,
             regrounding_delta=self.memory.regrounding_delta,
             regrounding_confidence=float(self.memory.regrounding_confidence),
