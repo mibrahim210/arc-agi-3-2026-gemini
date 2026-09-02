@@ -8368,24 +8368,85 @@ class MetacognitiveController:
                         walkable_colors = [c for c, cnt in c_dict.items() if 0.02 <= (cnt / total_cells) <= 0.35]
                         if not walkable_colors:
                             walkable_colors = [c for c in c_dict.keys() if c != bg_color]
+                        walkable_set = set(int(c) for c in walkable_colors)
 
                         from collections import deque
-                        q = deque([(px, py, [])])
-                        visited = {(px, py)}
+
+                        # Detect grid stride from walkable column spacing
+                        stride = 1
+                        if walkable_set:
+                            wc = next(iter(walkable_set))
+                            pts_w = np.argwhere(scene.grid == wc)
+                            if len(pts_w) >= 4:
+                                xs = sorted(set(int(v) for v in pts_w[:, 1]))
+                                if len(xs) >= 2:
+                                    gaps = [xs[i+1] - xs[i] for i in range(min(8, len(xs)-1)) if 2 <= xs[i+1] - xs[i] <= 9]
+                                    if gaps:
+                                        stride = int(round(sum(gaps) / len(gaps)))
+                                        stride = max(1, min(stride, 6))
+
+                        # Snap player to nearest walkable pixel
+                        spx, spy = px, py
+                        if stride > 1:
+                            sr = stride + 2
+                            best_d2 = 999
+                            for dy2 in range(-sr, sr+1):
+                                for dx2 in range(-sr, sr+1):
+                                    nx2, ny2 = px + dx2, py + dy2
+                                    if 0 <= nx2 < w and 0 <= ny2 < h:
+                                        if int(scene.grid[ny2, nx2]) in walkable_set:
+                                            d2 = abs(dx2) + abs(dy2)
+                                            if d2 < best_d2:
+                                                best_d2 = d2
+                                                spx, spy = nx2, ny2
+
+                        # Snap goal to nearest walkable pixel
+                        sgx, sgy = gx, gy
+                        if stride > 1:
+                            best_dg = 999
+                            for dy2 in range(-stride-2, stride+3):
+                                for dx2 in range(-stride-2, stride+3):
+                                    nx2, ny2 = gx + dx2, gy + dy2
+                                    if 0 <= nx2 < w and 0 <= ny2 < h:
+                                        if int(scene.grid[ny2, nx2]) in walkable_set:
+                                            dg = abs(dx2) + abs(dy2)
+                                            if dg < best_dg:
+                                                best_dg = dg
+                                                sgx, sgy = nx2, ny2
+
+                        # Primary stride-aligned BFS
+                        q = deque([(spx, spy, [])])
+                        visited = {(spx, spy)}
                         found_path = None
-                        stride = 3 if any(0.02 <= (cnt / total_cells) <= 0.35 for c, cnt in c_dict.items()) else 1
                         while q and len(visited) < 3000:
                             cx, cy, path = q.popleft()
-                            if abs(cx - gx) <= 2 and abs(cy - gy) <= 2:
+                            if abs(cx - sgx) <= stride + 1 and abs(cy - sgy) <= stride + 1:
                                 found_path = path
                                 break
                             for dname, ddx, ddy in [("ACTION1", 0, -1), ("ACTION2", 0, 1), ("ACTION3", -1, 0), ("ACTION4", 1, 0)]:
                                 nx, ny = cx + ddx * stride, cy + ddy * stride
                                 if 0 <= nx < w and 0 <= ny < h and (nx, ny) not in visited:
                                     sub = scene.grid[max(0, ny-1):min(h, ny+2), max(0, nx-1):min(w, nx+2)]
-                                    if np.any(np.isin(sub, walkable_colors)) or (abs(nx - gx) <= 2 and abs(ny - gy) <= 2):
+                                    if np.any(np.isin(sub, list(walkable_set))) or (abs(nx - sgx) <= stride+1 and abs(ny - sgy) <= stride+1):
                                         visited.add((nx, ny))
                                         q.append((nx, ny, path + [dname]))
+
+                        # Pixel-level BFS fallback (if stride search fails)
+                        if not found_path:
+                            q2 = deque([(spx, spy, [])])
+                            vis2 = {(spx, spy)}
+                            while q2 and len(vis2) < 5000:
+                                cx, cy, path = q2.popleft()
+                                if abs(cx - gx) <= 2 and abs(cy - gy) <= 2:
+                                    found_path = path
+                                    break
+                                for dname, ddx, ddy in [("ACTION1", 0, -1), ("ACTION2", 0, 1), ("ACTION3", -1, 0), ("ACTION4", 1, 0)]:
+                                    nx, ny = cx + ddx, cy + ddy
+                                    if 0 <= nx < w and 0 <= ny < h and (nx, ny) not in vis2:
+                                        if int(scene.grid[ny, nx]) not in {int(bg_color), 0, 6}:
+                                            vis2.add((nx, ny))
+                                            q2.append((nx, ny, path + [dname]))
+
                         if found_path and len(found_path) > 0:
                             opt_act = found_path[0]
                             if name == opt_act:
