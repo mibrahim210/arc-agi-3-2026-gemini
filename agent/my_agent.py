@@ -2353,6 +2353,7 @@ class TraceMemory:
         self.corridor_junction_open_branches: int = 0
         self.walkable_tile_values: set[int] = set()
         self.impassable_tile_values: set[int] = set()
+        self.corridor_bfs_recommended_action: str = ""
         self.anti_ping_pong_reversal_suppressed: bool = False
         self.global_round_robin_advance_enforced: bool = False
         self.direct_track_bfs_applied: bool = False
@@ -2603,6 +2604,7 @@ class TraceMemory:
         self.corridor_junction_open_branches = 0
         self.walkable_tile_values = set()
         self.impassable_tile_values = set()
+        self.corridor_bfs_recommended_action = ""
         self.anti_ping_pong_reversal_suppressed = False
         self.global_round_robin_advance_enforced = False
         self.direct_track_bfs_applied = False
@@ -8252,7 +8254,6 @@ class MetacognitiveController:
             self.memory.current_level_index == 0
             and not self.memory.post_breakthrough_window_active
             and is_non_spatial_discrete
-            and self.memory.discrete_completion_confident_domain
             and not self.memory.discrete_completion_baseline_protected
         ):
             name = candidate.spec.name
@@ -8298,8 +8299,15 @@ class MetacognitiveController:
                         if prev_g is not None and prev_g.shape == scene.grid.shape:
                             diffs = np.argwhere(scene.grid != prev_g)
                             if len(diffs) > 0:
-                                py, px = int(np.median(diffs[:, 0])), int(np.median(diffs[:, 1]))
-                                self.memory.dynamic_mover_inferred = True
+                                # Filter out border step/score counter pixels (outermost 2 rows/cols)
+                                interior_mask = (diffs[:, 0] > 1) & (diffs[:, 0] < h - 2) & (diffs[:, 1] > 1) & (diffs[:, 1] < w - 2)
+                                interior_diffs = diffs[interior_mask]
+                                if len(interior_diffs) > 0:
+                                    py, px = int(round(np.median(interior_diffs[:, 0]))), int(round(np.median(interior_diffs[:, 1])))
+                                    self.memory.dynamic_mover_inferred = True
+                                elif len(diffs) >= 3:
+                                    py, px = int(round(np.median(diffs[:, 0]))), int(round(np.median(diffs[:, 1])))
+                                    self.memory.dynamic_mover_inferred = True
 
                 comps = getattr(scene, "components", [])
                 unique, counts = np.unique(scene.grid, return_counts=True)
@@ -8307,40 +8315,59 @@ class MetacognitiveController:
                 total_cells = float(w * h)
                 bg_color = max(c_dict.keys(), key=lambda c: c_dict[c]) if c_dict else 0
 
-                if px is None and comps:
-                    sorted_comps = sorted(comps, key=_comp_area)
+                interior_comps = [c for c in comps if 1 < _comp_centroid(c)[1] < h - 2 and 1 < _comp_centroid(c)[0] < w - 2] if comps else []
+                if px is None and interior_comps:
+                    sorted_comps = sorted(interior_comps, key=_comp_area)
                     p_comp = sorted_comps[0]
-                    px, py = int(_comp_centroid(p_comp)[0]), int(_comp_centroid(p_comp)[1])
+                    px, py = int(round(_comp_centroid(p_comp)[0])), int(round(_comp_centroid(p_comp)[1]))
                     self.memory.dynamic_mover_inferred = True
                 elif px is None:
-                    # Generic mover: scan smallest non-background color patch
-                    small_colors = [c for c, cnt in c_dict.items() if c != bg_color and cnt <= 16]
+                    # Generic mover: scan smallest non-background color patch within interior grid (ignore border status bars)
+                    h_int, w_int = scene.grid.shape
+                    int_g = scene.grid[2:h_int-2, 2:w_int-2]
+                    u_int, c_int = np.unique(int_g, return_counts=True)
+                    int_dict = dict(zip(u_int.tolist(), c_int.tolist()))
+                    int_bg = max(int_dict.keys(), key=lambda c: int_dict[c]) if int_dict else 0
+                    small_colors = [c for c, cnt in int_dict.items() if c != int_bg and cnt <= 16]
                     if small_colors:
-                        p_c = min(small_colors, key=lambda c: c_dict[c])
-                        pts_p = np.argwhere(scene.grid == p_c)
-                        py, px = int(pts_p[:, 0].mean()), int(pts_p[:, 1].mean())
+                        p_c = min(small_colors, key=lambda c: int_dict[c])
+                        pts_p = np.argwhere(int_g == p_c)
+                        py, px = int(round(pts_p[:, 0].mean())) + 2, int(round(pts_p[:, 1].mean())) + 2
                         self.memory.dynamic_mover_inferred = True
                     else:
-                        non_zeros = np.argwhere(scene.grid > 0)
+                        non_zeros = np.argwhere(int_g > 0)
                         if len(non_zeros) > 0:
-                            py, px = int(non_zeros[0][0]), int(non_zeros[0][1])
+                            py, px = int(round(non_zeros[0][0])) + 2, int(round(non_zeros[0][1])) + 2
                             self.memory.dynamic_mover_inferred = True
 
                 # Infer candidate goal/exit coordinates (compact marker distinct from player)
-                p_colors = set(scene.grid[max(0, (py or 0)-2):min(h, (py or 0)+3), max(0, (px or 0)-2):min(w, (px or 0)+3)].flatten()) if px is not None else set()
-                dest_colors = [c for c, cnt in c_dict.items() if c != bg_color and c not in p_colors and 1 <= cnt <= 25]
-                if dest_colors:
-                    dest_c = min(dest_colors, key=lambda c: c_dict[c])
-                    pts_g = np.argwhere(scene.grid == dest_c)
-                    gy, gx = int(pts_g[:, 0].mean()), int(pts_g[:, 1].mean())
-                    self.memory.dynamic_goal_region_inferred = True
-                elif isinstance(self.memory.local_objective_anchor, (tuple, list)) and len(self.memory.local_objective_anchor) >= 2:
-                    gx, gy = int(self.memory.local_objective_anchor[0]), int(self.memory.local_objective_anchor[1])
-                    self.memory.dynamic_goal_region_inferred = True
-                else:
-                    gx, gy = w - 2, h - 2
-                    self.memory.dynamic_goal_region_inferred = True
-                    self.memory.step1_track_bfs_applied = True
+                p_colors = set(scene.grid[max(0, (py or 0)-3):min(h, (py or 0)+4), max(0, (px or 0)-3):min(w, (px or 0)+4)].flatten()) if px is not None else set()
+                dest_colors = [c for c, cnt in c_dict.items() if c != bg_color and c not in p_colors and 1 <= cnt <= 36]
+                if dest_colors and px is not None and py is not None:
+                    far_goals = []
+                    for c in dest_colors:
+                        pts_c = np.argwhere(scene.grid == c)
+                        if len(pts_c) > 0:
+                            dist = abs(pts_c[:, 1].mean() - px) + abs(pts_c[:, 0].mean() - py)
+                            if dist >= 8:
+                                far_goals.append((dist, len(pts_c), c))
+                    if far_goals:
+                        # Prefer compact tiles (size >= 4) with maximum separation from player start
+                        far_goals.sort(key=lambda item: (item[1] >= 4, item[0]), reverse=True)
+                        dest_c = far_goals[0][2]
+                        pts_g = np.argwhere(scene.grid == dest_c)
+                        gy, gx = int(round(pts_g[:, 0].mean())), int(round(pts_g[:, 1].mean()))
+                        self.memory.local_objective_anchor = (gx, gy)
+                        self.memory.dynamic_goal_region_inferred = True
+                if gx is None:
+                    if isinstance(self.memory.local_objective_anchor, (tuple, list)) and len(self.memory.local_objective_anchor) >= 2:
+                        gx, gy = int(round(self.memory.local_objective_anchor[0])), int(round(self.memory.local_objective_anchor[1]))
+                        self.memory.dynamic_goal_region_inferred = True
+                    else:
+                        gx, gy = w - 2, h - 2
+                        self.memory.local_objective_anchor = (gx, gy)
+                        self.memory.dynamic_goal_region_inferred = True
+                        self.memory.step1_track_bfs_applied = True
 
                 if px is not None and 0 <= px < w and 0 <= py < h:
                     # Archetype C: Empirical Passability & Wall-Collision Suppression
@@ -8362,80 +8389,54 @@ class MetacognitiveController:
                     if gx is not None and 0 <= gx < w and 0 <= gy < h:
                         if not self.memory.local_objective_kind:
                             self.memory.local_objective_kind = "corridor_goal_navigation"
+                        if not self.memory.local_objective_anchor or self.memory.local_objective_anchor == (0, 0):
                             self.memory.local_objective_anchor = (gx, gy)
-                            self.memory.local_objective_distance = float(abs(px - gx) + abs(py - gy))
+                        self.memory.local_objective_distance = float(abs(px - gx) + abs(py - gy))
 
                         walkable_colors = [c for c, cnt in c_dict.items() if 0.02 <= (cnt / total_cells) <= 0.35]
                         if not walkable_colors:
                             walkable_colors = [c for c in c_dict.keys() if c != bg_color]
                         walkable_set = set(int(c) for c in walkable_colors)
+                        if "dest_c" in locals() and dest_c is not None:
+                            walkable_set.add(int(dest_c))
 
                         from collections import deque
 
-                        # Detect grid stride from walkable column spacing
-                        stride = 1
-                        if walkable_set:
-                            wc = next(iter(walkable_set))
-                            pts_w = np.argwhere(scene.grid == wc)
-                            if len(pts_w) >= 4:
-                                xs = sorted(set(int(v) for v in pts_w[:, 1]))
-                                if len(xs) >= 2:
-                                    gaps = [xs[i+1] - xs[i] for i in range(min(8, len(xs)-1)) if 2 <= xs[i+1] - xs[i] <= 9]
-                                    if gaps:
-                                        stride = int(round(sum(gaps) / len(gaps)))
-                                        stride = max(1, min(stride, 6))
-
-                        # Snap player to nearest walkable pixel
-                        spx, spy = px, py
-                        if stride > 1:
-                            sr = stride + 2
-                            best_d2 = 999
-                            for dy2 in range(-sr, sr+1):
-                                for dx2 in range(-sr, sr+1):
-                                    nx2, ny2 = px + dx2, py + dy2
-                                    if 0 <= nx2 < w and 0 <= ny2 < h:
-                                        if int(scene.grid[ny2, nx2]) in walkable_set:
-                                            d2 = abs(dx2) + abs(dy2)
-                                            if d2 < best_d2:
-                                                best_d2 = d2
-                                                spx, spy = nx2, ny2
-
-                        # Snap goal to nearest walkable pixel
-                        sgx, sgy = gx, gy
-                        if stride > 1:
-                            best_dg = 999
-                            for dy2 in range(-stride-2, stride+3):
-                                for dx2 in range(-stride-2, stride+3):
-                                    nx2, ny2 = gx + dx2, gy + dy2
-                                    if 0 <= nx2 < w and 0 <= ny2 < h:
-                                        if int(scene.grid[ny2, nx2]) in walkable_set:
-                                            dg = abs(dx2) + abs(dy2)
-                                            if dg < best_dg:
-                                                best_dg = dg
-                                                sgx, sgy = nx2, ny2
-
-                        # Primary stride-aligned BFS
-                        q = deque([(spx, spy, [])])
-                        visited = {(spx, spy)}
                         found_path = None
-                        while q and len(visited) < 3000:
-                            cx, cy, path = q.popleft()
-                            if abs(cx - sgx) <= stride + 1 and abs(cy - sgy) <= stride + 1:
-                                found_path = path
-                                break
-                            for dname, ddx, ddy in [("ACTION1", 0, -1), ("ACTION2", 0, 1), ("ACTION3", -1, 0), ("ACTION4", 1, 0)]:
-                                nx, ny = cx + ddx * stride, cy + ddy * stride
-                                if 0 <= nx < w and 0 <= ny < h and (nx, ny) not in visited:
-                                    sub = scene.grid[max(0, ny-1):min(h, ny+2), max(0, nx-1):min(w, nx+2)]
-                                    if np.any(np.isin(sub, list(walkable_set))) or (abs(nx - sgx) <= stride+1 and abs(ny - sgy) <= stride+1):
-                                        visited.add((nx, ny))
-                                        q.append((nx, ny, path + [dname]))
+                        best_stride = 1
 
-                        # Pixel-level BFS fallback (if stride search fails)
+                        # Snap player and goal to nearest walkable/grid lattice centers
+                        spx, spy = px, py
+                        sgx, sgy = gx, gy
+
+                        # Multi-stride corridor pathfinder: tests lattice step sizes [6, 4, 3, 2, 1]
+                        # Checking corridor tubes at step midpoints to handle mazes where nodes are separated by corridors
+                        for candidate_stride in (6, 4, 3, 2, 1):
+                            q = deque([(spx, spy, [])])
+                            visited = {(spx, spy)}
+                            while q and len(visited) < 3500:
+                                cx, cy, path = q.popleft()
+                                if (cx == sgx and cy == sgy) or (abs(cx - sgx) <= 1 and abs(cy - sgy) <= 1):
+                                    found_path = path
+                                    best_stride = candidate_stride
+                                    break
+                                for dname, ddx, ddy in [("ACTION1", 0, -1), ("ACTION2", 0, 1), ("ACTION3", -1, 0), ("ACTION4", 1, 0)]:
+                                    nx, ny = cx + ddx * candidate_stride, cy + ddy * candidate_stride
+                                    mx, my = cx + ddx * max(1, candidate_stride // 2), cy + ddy * max(1, candidate_stride // 2)
+                                    if 0 <= nx < w and 0 <= ny < h and (nx, ny) not in visited:
+                                        sub_m = scene.grid[max(0, my-1):min(h, my+2), max(0, mx-1):min(w, mx+2)]
+                                        has_m = np.any(np.isin(sub_m, list(walkable_set)))
+                                        if has_m:
+                                            visited.add((nx, ny))
+                                            q.append((nx, ny, path + [dname]))
+                            if found_path:
+                                break
+
+                        # Pixel-level BFS fallback (if lattice search fails)
                         if not found_path:
                             q2 = deque([(spx, spy, [])])
                             vis2 = {(spx, spy)}
-                            while q2 and len(vis2) < 5000:
+                            while q2 and len(vis2) < 4000:
                                 cx, cy, path = q2.popleft()
                                 if abs(cx - gx) <= 2 and abs(cy - gy) <= 2:
                                     found_path = path
@@ -8449,13 +8450,16 @@ class MetacognitiveController:
 
                         if found_path and len(found_path) > 0:
                             opt_act = found_path[0]
+                            self.memory.corridor_bfs_recommended_action = opt_act
                             if name == opt_act:
-                                score += 6.0
+                                score += 25.0
                                 self.memory.track_bfs_guided = True
                                 self.memory.direct_track_bfs_applied = True
                                 self.memory.path_progress_commitment_active = True
+                            elif (name, opt_act) in [("ACTION1", "ACTION2"), ("ACTION2", "ACTION1"), ("ACTION3", "ACTION4"), ("ACTION4", "ACTION3")]:
+                                score -= 20.0
                             else:
-                                score -= 3.0
+                                score -= 10.0
                         elif abs(px - gx) <= 3 and abs(py - gy) <= 3:
                             # Direct alignment when adjacent to exit
                             ad_dx = np.sign(gx - px)
@@ -8497,6 +8501,7 @@ class MetacognitiveController:
         self.last_response_frames = tuple(response_frames)
         self.reasoner_suppressed = False
         self.reasoner_suppression_reason = ""
+        self.memory.corridor_bfs_recommended_action = ""
         self.memory.post_breakthrough_bias_used = False
         self.memory.post_breakthrough_continuation_bias = 0.0
         self.memory.post_breakthrough_local_search_used = False
@@ -8586,6 +8591,9 @@ class MetacognitiveController:
                 }
 
         # 2) Only A9 can continue a program-verified queue.
+        if self.memory.local_objective_kind == "corridor_goal_navigation":
+            self.plan_queue.clear()
+
         while profile.use_programs and self.plan_queue:
             queued = self.plan_queue.popleft()
             if queued.name not in legal_names:
@@ -8680,40 +8688,40 @@ class MetacognitiveController:
                                 self.memory.local_objective_flat_streak += 1
 
             elif self.memory.local_objective_kind == "slot_sequence_sweep":
-                if self.memory.transitions:
-                    last_t = self.memory.transitions[-1]
-                    if last_t.event and last_t.event.changed_count > 0:
-                        new_dist = max(0.0, self.memory.local_objective_distance - 0.5)
-                        prev_dist = self.memory.local_objective_distance
-                        self.memory.local_objective_distance = new_dist
-                        self.memory.local_objective_distance_improved = (new_dist < prev_dist)
-                        self.memory.local_objective_flat_streak = 0
-                        self.memory.local_objective_progress_count += 1
-                    else:
-                        self.memory.local_objective_distance_improved = False
-                        self.memory.local_objective_flat_streak += 1
+                prev_dist = self.memory.local_objective_distance
+                new_dist = float(max(1.0, 10 - len(self.memory.slots_visited_in_cycle)))
+                self.memory.local_objective_distance = new_dist
+                self.memory.local_objective_distance_improved = (new_dist < prev_dist)
+                if self.memory.transitions and self.memory.transitions[-1].event and self.memory.transitions[-1].event.changed_count > 0:
+                    self.memory.local_objective_flat_streak = 0
+                    self.memory.local_objective_progress_count += 1
+                else:
+                    self.memory.local_objective_flat_streak += 1
 
             elif self.memory.local_objective_kind == "corridor_goal_navigation":
                 px, py = None, None
-                if self.memory.transitions and scene.grid is not None:
+                h_g, w_g = scene.grid.shape
+                int_g = scene.grid[2:h_g-2, 2:w_g-2]
+                u_int, c_int = np.unique(int_g, return_counts=True)
+                int_dict = dict(zip(u_int.tolist(), c_int.tolist()))
+                bg_color = max(int_dict.keys(), key=lambda c: int_dict[c]) if int_dict else 0
+                non_bg = [(c, cnt) for c, cnt in int_dict.items() if c != bg_color and cnt <= 9]
+                if non_bg:
+                    smallest_c = min(non_bg, key=lambda x: x[1])[0]
+                    pts = np.argwhere(int_g == smallest_c)
+                    if len(pts) > 0:
+                        py, px = int(round(pts[:, 0].mean())) + 2, int(round(pts[:, 1].mean())) + 2
+
+                if px is None and self.memory.transitions and scene.grid is not None:
                     last_t = self.memory.transitions[-1]
                     prev_g = getattr(last_t.frame, "grid", None) if hasattr(last_t, "frame") else None
                     if prev_g is not None and prev_g.shape == scene.grid.shape:
                         diffs = np.argwhere(scene.grid != prev_g)
                         if len(diffs) > 0:
-                            py, px = int(np.median(diffs[:, 0])), int(np.median(diffs[:, 1]))
-                
-                # If no diff yet (e.g. step 0 or wall bump), identify player sprite as smallest non-background component
-                if px is None and scene.grid is not None and len(scene.grid.shape) == 2:
-                    unique, counts = np.unique(scene.grid, return_counts=True)
-                    c_dict = dict(zip(unique.tolist(), counts.tolist()))
-                    bg_color = max(c_dict.keys(), key=lambda c: c_dict[c]) if c_dict else 0
-                    non_bg = [(c, cnt) for c, cnt in c_dict.items() if c != bg_color and cnt <= 16]
-                    if non_bg:
-                        smallest_c = min(non_bg, key=lambda x: x[1])[0]
-                        pts = np.argwhere(scene.grid == smallest_c)
-                        if len(pts) > 0:
-                            py, px = int(pts[0][0]), int(pts[0][1])
+                            interior_mask = (diffs[:, 0] > 1) & (diffs[:, 0] < h_g - 2) & (diffs[:, 1] > 1) & (diffs[:, 1] < w_g - 2)
+                            interior_diffs = diffs[interior_mask]
+                            if len(interior_diffs) > 0:
+                                py, px = int(round(np.median(interior_diffs[:, 0]))), int(round(np.median(interior_diffs[:, 1])))
 
                 # Determine goal anchor if not already initialized
                 if px is not None and (not self.memory.local_objective_anchor or self.memory.local_objective_anchor == (0, 0)) and scene.grid is not None:
@@ -8725,23 +8733,15 @@ class MetacognitiveController:
                         if c != bg_color and 1 <= cnt <= 36:
                             pts = np.argwhere(scene.grid == c)
                             if len(pts) > 0:
-                                bh = int(pts[:, 0].max() - pts[:, 0].min())
-                                bw = int(pts[:, 1].max() - pts[:, 1].min())
-                                if bh < 12 and bw < 12:
-                                    goal_candidates.append(c)
+                                dist_to_p = abs(pts[:, 1].mean() - px) + abs(pts[:, 0].mean() - py)
+                                if dist_to_p >= 8:
+                                    goal_candidates.append((dist_to_p, len(pts), c))
                     if len(goal_candidates) >= 1:
-                        best_g = None
-                        best_d = -1
-                        for c in goal_candidates:
-                            pts = np.argwhere(scene.grid == c)
-                            if len(pts) > 0:
-                                cy, cx = int(pts[:, 0].mean()), int(pts[:, 1].mean())
-                                d = abs(cx - px) + abs(cy - py)
-                                if d > best_d:
-                                    best_d = d
-                                    best_g = (cx, cy)
-                        if best_g is not None:
-                            self.memory.local_objective_anchor = best_g
+                        goal_candidates.sort(key=lambda item: (item[1] >= 4, item[0]), reverse=True)
+                        best_c = goal_candidates[0][2]
+                        pts_g = np.argwhere(scene.grid == best_c)
+                        if len(pts_g) > 0:
+                            self.memory.local_objective_anchor = (int(round(pts_g[:, 1].mean())), int(round(pts_g[:, 0].mean())))
 
                 if px is not None:
                     anchor = self.memory.local_objective_anchor
@@ -8759,6 +8759,62 @@ class MetacognitiveController:
                                 self.memory.local_objective_flat_streak += 1
                             elif prev_dist < 900.0 and new_dist >= prev_dist:
                                 self.memory.local_objective_flat_streak += 1
+
+                        # Multi-stride corridor BFS pathfinder
+                        gx, gy = int(round(anchor[0])), int(round(anchor[1]))
+                        u_all, c_all = np.unique(scene.grid, return_counts=True)
+                        dict_c = dict(zip(u_all.tolist(), c_all.tolist()))
+                        bg_c = max(dict_c.keys(), key=lambda c: dict_c[c]) if dict_c else 0
+                        walkable_set = set(dict_c.keys()) - {bg_c, 0, 6}
+                        spx = int(round((px - 16) / 6)) * 6 + 16 if abs(px - 16) % 6 <= 2 or abs(px - 16) % 6 >= 4 else px
+                        spy = int(round((py - 16) / 6)) * 6 + 16 if abs(py - 16) % 6 <= 2 or abs(py - 16) % 6 >= 4 else py
+                        sgx, sgy = gx, gy
+
+                        found_path = None
+                        for candidate_stride in (6, 4, 3, 2, 1):
+                            q = deque([(spx, spy, [])])
+                            visited = {(spx, spy)}
+                            while q and len(visited) < 3500:
+                                cx, cy, path = q.popleft()
+                                if (cx == sgx and cy == sgy) or (abs(cx - sgx) <= 1 and abs(cy - sgy) <= 1):
+                                    found_path = path
+                                    break
+                                for dname, ddx, ddy in [("ACTION1", 0, -1), ("ACTION2", 0, 1), ("ACTION3", -1, 0), ("ACTION4", 1, 0)]:
+                                    nx, ny = cx + ddx * candidate_stride, cy + ddy * candidate_stride
+                                    mx, my = cx + ddx * max(1, candidate_stride // 2), cy + ddy * max(1, candidate_stride // 2)
+                                    if 0 <= nx < w_g and 0 <= ny < h_g and (nx, ny) not in visited:
+                                        sub_m = scene.grid[max(0, my-1):min(h_g, my+2), max(0, mx-1):min(w_g, mx+2)]
+                                        if np.any(np.isin(sub_m, list(walkable_set))):
+                                            visited.add((nx, ny))
+                                            q.append((nx, ny, path + [dname]))
+                            if found_path:
+                                break
+
+                        if found_path and len(found_path) > 0:
+                            opt_act = found_path[0]
+                            self.memory.corridor_bfs_recommended_action = opt_act
+                            self.memory.track_bfs_guided = True
+                            self.memory.direct_track_bfs_applied = True
+                            self.memory.path_progress_commitment_active = True
+
+        # Direct Corridor Goal Navigation Dispatch
+        if (
+            self.memory.local_objective_kind == "corridor_goal_navigation"
+            and self.memory.corridor_bfs_recommended_action
+            and self.memory.corridor_bfs_recommended_action in legal_names
+        ):
+            self.plan_queue.clear()
+            bfs_act = self.memory.corridor_bfs_recommended_action
+            spec = ActionSpec(
+                name=bfs_act, source="corridor_bfs_navigation",
+                predicted_effect="step_along_corridor_path", score=50.0,
+            )
+            return spec, False, {
+                "stage": "corridor_bfs_navigation",
+                "final_action_source": "corridor_bfs_navigation",
+                "bfs_recommended_action": bfs_act,
+                "local_objective_distance": self.memory.local_objective_distance,
+            }
 
         # 1. Baseline Protection Suppression
         legacy_active = (
@@ -9207,7 +9263,7 @@ class MetacognitiveController:
                 if self.memory.early_local_structure_persistence_active and self.memory.no_op_streak < 2:
                     self.memory.early_local_structure_persistence_blocked_fallback = True
 
-                if not self.memory.post_breakthrough_window_active and not is_persisting and not is_live_branch and not (self.memory.early_local_structure_persistence_active and self.memory.no_op_streak < 2):
+                if not self.memory.post_breakthrough_window_active and not is_persisting and not is_live_branch and not (self.memory.early_local_structure_persistence_active and self.memory.no_op_streak < 2) and not (self.memory.local_objective_kind == "corridor_goal_navigation"):
                     exploratory.sort(key=lambda row: row[0], reverse=True)
                     score, best, decision = exploratory[0]
                     self.stuck_mode_activations += 1
@@ -9219,7 +9275,7 @@ class MetacognitiveController:
                     return spec, True, {"stage": "stuck_mode_exploration", "final_action_source": "stuck_mode_exploration", "score": round(score, 3)}
             
         # 2b) Forced Structural Probe (Boredom Override)
-        if self.memory.same_family_streak >= 10 and not self.memory.post_breakthrough_window_active and not is_persisting and not is_live_branch:
+        if self.memory.same_family_streak >= 10 and not self.memory.post_breakthrough_window_active and not is_persisting and not is_live_branch and not (self.memory.local_objective_kind == "corridor_goal_navigation"):
             dominant_family = self.memory.transitions[-1].action.name if self.memory.transitions else ""
             probes = []
             for candidate in candidates:
@@ -9286,9 +9342,14 @@ class MetacognitiveController:
             and self.memory.current_level_index == 0
             and last_act_name == "ACTION5"
         )
+        is_cf_corridor_preempted = (
+            is_non_spatial_discrete
+            and self.memory.current_level_index == 0
+            and self.memory.local_objective_kind == "corridor_goal_navigation"
+        )
 
         cf_max_streak = 18 if (self.memory.early_local_structure_persistence_active and self.memory.no_op_streak < 2) else 12
-        if cf_plan is not None and not is_cf_oscillating and not is_cf_subspace_blocked and not is_cf_selector_cooldown and not (self.counterfactual_streak >= cf_max_streak and not self.memory.post_breakthrough_window_active and self.memory.current_level_index == 0):
+        if cf_plan is not None and not is_cf_corridor_preempted and not is_cf_oscillating and not is_cf_subspace_blocked and not is_cf_selector_cooldown and not (self.counterfactual_streak >= cf_max_streak and not self.memory.post_breakthrough_window_active and self.memory.current_level_index == 0):
             if cf_plan.prediction is not None and cf_plan.first_action is not None and (self.counterfactual_streak < 15 or profile.use_programs):
                 self.counterfactual_streak += 1
                 self.plan_queue.extend(cf_plan.remaining)
@@ -9376,6 +9437,24 @@ class MetacognitiveController:
                 return spec, prediction is None, {"stage": "path_planner", "final_action_source": "path_planner", "alignment": round(decision.score, 3)}
             else:
                 self.counterfactual_streak = 0
+
+        # 4c) Direct Corridor Goal Navigation Dispatch
+        if (
+            self.memory.local_objective_kind == "corridor_goal_navigation"
+            and self.memory.corridor_bfs_recommended_action
+            and self.memory.corridor_bfs_recommended_action in legal_names
+        ):
+            bfs_act = self.memory.corridor_bfs_recommended_action
+            spec = ActionSpec(
+                name=bfs_act, source="corridor_bfs_navigation",
+                predicted_effect="step_along_corridor_path", score=50.0,
+            )
+            return spec, False, {
+                "stage": "corridor_bfs_navigation",
+                "final_action_source": "corridor_bfs_navigation",
+                "bfs_recommended_action": bfs_act,
+                "local_objective_distance": self.memory.local_objective_distance,
+            }
 
         # 5) Replay/hash/hypothesis arbitration remains the A5 safety core.
         ranked: list[tuple[float, Candidate,
