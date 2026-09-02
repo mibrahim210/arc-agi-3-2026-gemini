@@ -117,6 +117,7 @@ The agent distinguishes between:
 - mechanism beliefs and shift events
 - winning pattern transfer state
 - post-breakthrough exploitation windows
+- early local-structure persistence windows and anti-diversion telemetry
 - control-band saturation and setup-budget state
 - oscillation suppression pockets and breakout seeds
 - meaningful-progress vs micro-churn telemetry
@@ -276,6 +277,20 @@ On the next level transition, this can activate a **post-breakthrough exploitati
 
 This is a temporary high-confidence exploitation overlay, not a permanent lock-in.
 
+### 4.11B Early Local-Structure Persistence
+
+The current code also contains a generic **early local-structure persistence** layer for puzzles whose first productive evidence appears in a small interior neighborhood.
+
+Within roughly the first 60 steps of Level 0, repeated nearby non-noop `ACTION6` interactions can:
+
+- open a bounded `early_local_structure_window`
+- preserve nearby local continuation around a learned anchor
+- extend the window while nearby actions keep producing real changes
+- suppress top-band diversion when a control band is not yet strongly confirmed
+- close on repeated no-ops, large jumps, or level transition
+
+This mechanism is intended to preserve productive interior exploration without breaking true control-band puzzles.
+
 ### 4.12 Control-Band and Interior-Application Phasing
 
 The current code includes a generic phase transition for puzzles that appear to require interaction with a control strip or border band before applying effects inside the main canvas.
@@ -309,6 +324,8 @@ Then, if a breakout from that suppressed pocket produces real progress, it can:
 - activate a temporary `finish_corridor_active` mode after coherent repeated progress
 
 Finish-corridor mode is the current bridge between “escaping a loop” and “actually converting the productive branch into a level clear.”
+
+In the current implementation, finish-corridor is also one of the dominant generic conversion layers in traces, so it must be analyzed as both a strength and a possible source of non-converting action burn.
 
 ## 5. Current Decision Ladder
 
@@ -374,6 +391,7 @@ The current code contains several anti-collapse layers:
 - post-breakthrough contradiction aborts
 - caps on post-breakthrough `stuck_mode_exploration`
 - caps on post-breakthrough alignment fallback churn
+- early local-structure persistence with temporary top-band suppression
 - control-band setup budgeting
 - interior-application phase forcing
 - two-anchor oscillation suppression
@@ -513,6 +531,26 @@ So the best description of the current code is:
 - post-breakthrough exploitation now exists as a first-class policy layer
 - control-band to interior phasing is now an explicit generic mechanism
 - oscillation breakout can now be converted into short-lived finish-corridor commitment
+- early local-structure persistence can restore baseline interior solves without game-specific branching
+
+### Current Calibration Snapshot
+
+The current repository calibration point is the local 25-game run archived at:
+
+- `traces_archive/2026-08-31_13-37-17`
+
+Observed result:
+
+- aggregate scorecard score: `0.17819664591688916`
+- progressed games: `tn36`, `vc33`, `r11l`, `lf52`, `lp85`
+
+What this run currently validates:
+
+- `vc33` still converts through control-band setup into interior application
+- `r11l` still converts through oscillation breakout, bounded continuation, and finish behavior
+- `lf52` baseline recovery depends on the early local-structure persistence layer
+- post-breakthrough and deep-search logic are present but remain lower-volume than the broader bounded conversion stack
+- many unsolved games still spend much more time in conversion-heavy bounded continuation than in explicit deep-search or post-breakthrough follow-through
 
 ## 12. Current Weaknesses
 
@@ -523,6 +561,8 @@ So the best description of the current code is:
 - post-breakthrough bias attribution is still easier to trace than to optimize
 - meaningful-progress calibration is still delicate and can over- or under-hold a local branch
 - finish-corridor continuation is still short-horizon and may miss longer hidden-task solution chains
+- several unsolved games still show very high `finish_corridor_active`, `interior_application_phase_active`, or `micro_change_churn_detected` without converting to level progress
+- trace archives often shard a single episode across many JSONL files, so diagnostics must aggregate by game and step rather than treating each file as an independent run
 - hidden-game generalization remains the open problem, not notebook plumbing
 
 ## 13. How To Update This File

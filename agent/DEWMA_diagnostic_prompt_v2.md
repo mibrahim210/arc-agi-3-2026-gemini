@@ -15,11 +15,14 @@ Analyze the repository directly. Do not ask me to paste trace rows that already 
 - Trace-run input: a specific timestamped subfolder such as `traces_archive/2026-08-30_14-35-20`
 - Expected evaluation set: 25 distinct game IDs
 - Possible auxiliary evidence in the same folder:
+  - `summary.md`
   - `trace_<game_id>_*.jsonl`
   - `llm_forensics_<game_id>.jsonl`
   - run summaries or scorecards
 
 Recursively discover the files. Derive the game ID primarily from each JSON record's `game_id`; use the filename only as a fallback. Report missing, malformed, empty, or unassigned files. If fewer or more than 25 distinct games are found, continue the analysis but flag the discrepancy prominently.
+
+Read `summary.md` first when it exists. Treat it as run-level metadata and a cross-check for score, inventory, and progressed games, not as a replacement for per-trace analysis.
 
 Analyze only the trace-run folder explicitly provided by the user. Do not silently combine sibling folders under `traces_archive/`. Accept both Windows-style input such as `traces_archive\2026-08-30_14-35-20` and POSIX-style input such as `traces_archive/2026-08-30_14-35-20`; normalize the path before processing.
 
@@ -66,6 +69,10 @@ The diagnostic must explicitly test these current layers:
 
 Do not reduce the updated architecture to the earlier generic “fallback churn” hypothesis. Determine which conversion layer fails first and whether later layers ever receive a valid opportunity to help.
 
+Also test shard-aware run aggregation and summary-level compatibility checks.
+
+Also determine whether the archive is a baseline-preservation run, a selected-game specialist run, or a full 25-game portfolio run, because the interpretation standard differs across those cases.
+
 ## Non-Negotiable Data-Hygiene Rules
 
 Before computing metrics:
@@ -80,6 +87,8 @@ Before computing metrics:
 8. Separate physical actions from repeated logging/animation frames. Explain the event identity rule used.
 9. Segment episodes and levels using explicit reset/level transitions where available; otherwise infer boundaries conservatively from step, level, timestamp, and state-key discontinuities.
 10. Keep LLM forensic records linked to, but separate from, physical trace events unless a reliable step/timestamp join exists.
+
+11. If `source` or `decision_source` is absent, null, or effectively constant, mark decision-stage attribution as partial and rely on other emitted controller fields rather than inventing a stage breakdown.
 
 The clustering is invalid if it is based on duplicated cumulative shards or cumulative counters incorrectly summed across rows.
 
@@ -231,6 +240,22 @@ Use this only as a hypothesis seed. These samples may predate the updated contro
 
 Do not generalize these two games to all 25 without the full feature matrix.
 
+## Current Calibration Reference
+
+Use the local 25-game run at `traces_archive/2026-08-31_13-37-17` as the default portfolio calibration point unless the user explicitly names a newer baseline.
+
+That run established:
+
+- aggregate scorecard score: `0.17819664591688916`
+- progressed games: `tn36`, `vc33`, `r11l`, `lf52`, `lp85`
+
+When analyzing later runs, explicitly report whether they:
+
+- preserve all five calibration games
+- preserve only a subset of the five
+- trade one calibration solve for a different game
+- improve aggregate score without preserving the same baseline set
+
 ## Core Position
 
 The current DEWMA agent does **not** appear primarily compute-bound, and it does **not** appear primarily trapped by immediate early exits.
@@ -238,6 +263,8 @@ The current DEWMA agent does **not** appear primarily compute-bound, and it does
 The stronger working hypothesis is:
 
 > DEWMA is currently **churn-bound and weak-conversion-bound**. It often spends a large fraction of its physical action budget in fallback-heavy or low-yield exploration stages, and when it does achieve early progress, it still struggles to convert that progress into additional level completions.
+
+For the August 31, 2026 calibration run, test the stronger sub-hypothesis that DEWMA's restored baseline now depends on a bounded conversion stack led by control-band phasing, oscillation breakout, early local-structure persistence, and finish-corridor continuation, while many unsolved games still consume action budget inside those same conversion layers without reaching level progress.
 
 This means the most important diagnostic question is not:
 
@@ -437,6 +464,7 @@ Please answer these concretely from the code and traces.
 8. Is DEWMA under-using wall-clock compute on promising states even while over-using physical actions globally?
 9. Which mechanism families dominate beliefs, and do the new detectors diversify them?
 10. What is the single biggest reason the current code fails to convert early progress into more completions?
+11. Does the run preserve the current five-game baseline portfolio, and if not, which mechanism appears responsible for the regression?
 
 ---
 
@@ -455,6 +483,7 @@ If you agree that DEWMA is currently churn-bound / weak-conversion-bound, provid
    - spend much more compute on promising states and post-breakthrough states
 4. A recommended continuation-mode policy that is more aggressive after first progress without removing safety.
 5. Three trace fields or summaries that would best confirm the fix worked.
+6. Whether the proposed change is baseline-safe against the current five calibration games, and which of the five should be rerun first to verify safety.
 
 If you disagree, explain:
 
@@ -532,6 +561,7 @@ In no more than ten bullets, state:
 - how many primary clusters were selected
 - the dominant portfolio-wide failure
 - whether the original churn/weak-conversion hypothesis is supported, partially supported, or rejected
+- whether the current five-game calibration baseline was preserved, improved, or regressed
 - the three highest-priority experiments
 
 ### B. Complete 25-Game Assignment Table

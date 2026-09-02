@@ -377,6 +377,20 @@ class Component:
     compactness: float
 
 
+def _comp_centroid(c: Any) -> tuple[float, float]:
+    if hasattr(c, "centroid") and c.centroid:
+        return float(c.centroid[0]), float(c.centroid[1])
+    if hasattr(c, "bbox") and c.bbox:
+        return (float(c.bbox[0]) + float(c.bbox[2])) / 2.0, (float(c.bbox[1]) + float(c.bbox[3])) / 2.0
+    if hasattr(c, "center") and c.center:
+        return float(c.center[0]), float(c.center[1])
+    return float(getattr(c, "x", 0)), float(getattr(c, "y", 0))
+
+
+def _comp_area(c: Any) -> int:
+    return int(getattr(c, "area", getattr(c, "size", 1)))
+
+
 @dataclass(slots=True)
 class TrackedEntity:
     entity_id: str
@@ -765,6 +779,57 @@ class DiagnosticTraceRecord:
     finish_corridor_family: str = ""
     finish_corridor_bias_applied: bool = False
     finish_corridor_exit_reason: str = ""
+    finish_corridor_plateau_detected: bool = False
+    finish_corridor_plateau_steps: int = 0
+    finish_corridor_narrowing_score: float = 0.0
+    finish_corridor_family_consensus: float = 0.0
+    finish_corridor_exited_for_plateau: bool = False
+    action_subspace_escape_active: bool = False
+    action_subspace_streak: int = 0
+    action_subspace_rotation_applied: bool = False
+    local_cycle_completed: bool = False
+    homogeneous_plan_penalized: bool = False
+    path_escape_candidate_injected: bool = False
+    receptacle_attractor_bias_applied: bool = False
+    slot_hysteresis_rotation_applied: bool = False
+    walkable_path_lookahead_steered: bool = False
+    track_bfs_guided: bool = False
+    receptacle_settlement_locked: bool = False
+    slot_systematic_sweep_applied: bool = False
+    systematic_sweep_persistence_active: bool = False
+    systematic_sweep_persistence_kept_control: bool = False
+    local_settlement_score: float = 0.0
+    selector_switch_allowed_by_settlement: bool = False
+    dynamic_mover_inferred: bool = False
+    dynamic_goal_region_inferred: bool = False
+    post_rotation_branch_persistence_active: bool = False
+    discrete_completion_corridor_active: bool = False
+    discrete_completion_corridor_steps_remaining: int = 0
+    local_objective_kind: str = ""
+    local_objective_distance: float = 0.0
+    local_objective_distance_improved: bool = False
+    local_objective_flat_streak: int = 0
+    micro_change_without_objective_progress: bool = False
+    settlement_commitment_active: bool = False
+    slot_cycle_completion_detected: bool = False
+    path_progress_commitment_active: bool = False
+    junction_oscillation_detected: bool = False
+    junction_branch_redirect_applied: bool = False
+    piece_settlement_locked: bool = False
+    coordinate_descent_advance_enforced: bool = False
+    passability_wall_collision_suppressed: bool = False
+    corridor_junction_open_branches: int = 0
+    anti_ping_pong_reversal_suppressed: bool = False
+    global_round_robin_advance_enforced: bool = False
+    direct_track_bfs_applied: bool = False
+    selector_switch_cooldown_active: bool = False
+    shape_matched_receptacle_paired: bool = False
+    synchronized_slot_cadence_applied: bool = False
+    step1_track_bfs_applied: bool = False
+    frozen_subgoal_invariants_count: int = 0
+    discrete_completion_confident_domain: bool = False
+    discrete_completion_auto_released: bool = False
+    discrete_completion_baseline_protected: bool = False
     dense_local_recolor_continuity_active: bool = False
     control_band_border_confirmed: bool = False
     interior_application_exit_reason: str = ""
@@ -2229,6 +2294,87 @@ class TraceMemory:
         self.finish_corridor_family: str = ""
         self.finish_corridor_bias_applied: bool = False
         self.finish_corridor_exit_reason: str = ""
+        self.finish_corridor_plateau_detected: bool = False
+        self.finish_corridor_plateau_steps: int = 0
+        self.finish_corridor_cumulative_steps: int = 0
+        self.finish_corridor_narrowing_score: float = 0.0
+        self.finish_corridor_family_consensus: float = 0.0
+        self.finish_corridor_exited_for_plateau: bool = False
+        self.action_subspace_escape_active: bool = False
+        self.action_subspace_escape_steps_remaining: int = 0
+        self.action_subspace_escape_dominant_action: str = ""
+        self.action_subspace_escape_dominant_subspace: str = ""
+        self.action_subspace_streak: int = 0
+        self.current_action_subspace: str = ""
+        self.action_subspace_rotation_applied: bool = False
+        self.local_cycle_completed: bool = False
+        self.homogeneous_plan_penalized: bool = False
+        self.path_escape_candidate_injected: bool = False
+        self.receptacle_attractor_bias_applied: bool = False
+        self.slot_hysteresis_rotation_applied: bool = False
+        self.walkable_path_lookahead_steered: bool = False
+        self.slot_tune_streak: int = 0
+        self.track_bfs_guided: bool = False
+        self.receptacle_settlement_locked: bool = False
+        self.slot_systematic_sweep_applied: bool = False
+        self.current_slot_index: int = 0
+        self.slot_tune_counts: dict[int, int] = {}
+        self.systematic_sweep_persistence_active: bool = False
+        self.systematic_sweep_persistence_steps_remaining: int = 0
+        self.systematic_sweep_persistence_kept_control: bool = False
+        self.local_settlement_score: float = 0.0
+        self.selector_switch_allowed_by_settlement: bool = False
+        self.dynamic_mover_inferred: bool = False
+        self.dynamic_goal_region_inferred: bool = False
+        self.post_rotation_branch_persistence_active: bool = False
+        self.post_rotation_branch_persistence_steps_remaining: int = 0
+        self.post_rotation_favored_action: str = ""
+        self.discrete_completion_corridor_active: bool = False
+        self.discrete_completion_corridor_steps_remaining: int = 0
+        self.discrete_completion_corridor_dominant_branch: str = ""
+        self.local_objective_kind: str = ""
+        self.local_objective_anchor: tuple[int, int] | int | None = None
+        self.local_objective_distance: float = 999.0
+        self.local_objective_distance_improved: bool = False
+        self.local_objective_progress_count: int = 0
+        self.local_objective_flat_streak: int = 0
+        self.micro_change_without_objective_progress: bool = False
+        self.settlement_commitment_active: bool = False
+        self.slot_cycle_completion_detected: bool = False
+        self.slots_visited_in_cycle: set[int] = set()
+        self.path_progress_commitment_active: bool = False
+        self.junction_oscillation_detected: bool = False
+        self.junction_branch_redirect_applied: bool = False
+        self.recent_discrete_directions: list[str] = []
+        self.consecutive_slot_tune_count: int = 0
+        self.coordinate_descent_advance_enforced: bool = False
+        self.piece_settlement_locked: bool = False
+        self.passability_wall_collision_suppressed: bool = False
+        self.corridor_junction_open_branches: int = 0
+        self.walkable_tile_values: set[int] = set()
+        self.impassable_tile_values: set[int] = set()
+        self.anti_ping_pong_reversal_suppressed: bool = False
+        self.global_round_robin_advance_enforced: bool = False
+        self.direct_track_bfs_applied: bool = False
+        self.slots_tuned_in_current_cycle: set[int] = set()
+        self.slot_advance_lock_active: bool = False
+        self.last_discrete_mover_action: str = ""
+        self.selector_switch_cooldown_active: bool = False
+        self.shape_matched_receptacle_paired: bool = False
+        self.synchronized_slot_cadence_applied: bool = False
+        self.step1_track_bfs_applied: bool = False
+        self.frozen_subgoal_invariants: set[tuple[int, int]] = set()
+        self.discrete_completion_confident_domain: bool = False
+        self.discrete_completion_auto_released: bool = False
+        self.discrete_completion_baseline_protected: bool = False
+        self.discrete_evidence_streak: int = 0
+        self.slot_cadence_tune_count: int = 0
+        self.discrete_monotone_action: str = ""
+        self.discrete_monotone_streak: int = 0
+        self.discrete_monotone_suppressed_action: str = ""
+        self.discrete_monotone_suppression_steps_remaining: int = 0
+        self.discrete_fallback_cycle_detected: bool = False
+        self.discrete_fallback_cycle_suppressed_pattern: list[str] = []
         self.dense_local_recolor_continuity_active: bool = False
         self.control_band_border_confirmed: bool = False
         self.interior_application_exit_reason: str = ""
@@ -2398,6 +2544,81 @@ class TraceMemory:
         self.finish_corridor_family = ""
         self.finish_corridor_bias_applied = False
         self.finish_corridor_exit_reason = ""
+        self.finish_corridor_plateau_detected = False
+        self.finish_corridor_plateau_steps = 0
+        self.finish_corridor_cumulative_steps = 0
+        self.finish_corridor_narrowing_score = 0.0
+        self.finish_corridor_family_consensus = 0.0
+        self.finish_corridor_exited_for_plateau = False
+        self.action_subspace_escape_active = False
+        self.action_subspace_escape_steps_remaining = 0
+        self.action_subspace_escape_dominant_action = ""
+        self.action_subspace_escape_dominant_subspace = ""
+        self.action_subspace_streak = 0
+        self.current_action_subspace = ""
+        self.action_subspace_rotation_applied = False
+        self.local_cycle_completed = False
+        self.homogeneous_plan_penalized = False
+        self.path_escape_candidate_injected = False
+        self.receptacle_attractor_bias_applied = False
+        self.slot_hysteresis_rotation_applied = False
+        self.walkable_path_lookahead_steered = False
+        self.slot_tune_streak = 0
+        self.track_bfs_guided = False
+        self.receptacle_settlement_locked = False
+        self.slot_systematic_sweep_applied = False
+        self.current_slot_index = 0
+        self.slot_tune_counts = {}
+        self.systematic_sweep_persistence_active = False
+        self.systematic_sweep_persistence_steps_remaining = 0
+        self.systematic_sweep_persistence_kept_control = False
+        self.local_settlement_score = 0.0
+        self.selector_switch_allowed_by_settlement = False
+        self.dynamic_mover_inferred = False
+        self.dynamic_goal_region_inferred = False
+        self.post_rotation_branch_persistence_active = False
+        self.post_rotation_branch_persistence_steps_remaining = 0
+        self.post_rotation_favored_action = ""
+        self.discrete_completion_corridor_active = False
+        self.discrete_completion_corridor_steps_remaining = 0
+        self.discrete_completion_corridor_dominant_branch = ""
+        self.local_objective_kind = ""
+        self.local_objective_anchor = None
+        self.local_objective_distance = 999.0
+        self.local_objective_distance_improved = False
+        self.local_objective_progress_count = 0
+        self.local_objective_flat_streak = 0
+        self.micro_change_without_objective_progress = False
+        self.settlement_commitment_active = False
+        self.slot_cycle_completion_detected = False
+        self.slots_visited_in_cycle = set()
+        self.path_progress_commitment_active = False
+        self.junction_oscillation_detected = False
+        self.junction_branch_redirect_applied = False
+        self.recent_discrete_directions = []
+        self.consecutive_slot_tune_count = 0
+        self.coordinate_descent_advance_enforced = False
+        self.piece_settlement_locked = False
+        self.passability_wall_collision_suppressed = False
+        self.corridor_junction_open_branches = 0
+        self.walkable_tile_values = set()
+        self.impassable_tile_values = set()
+        self.anti_ping_pong_reversal_suppressed = False
+        self.global_round_robin_advance_enforced = False
+        self.direct_track_bfs_applied = False
+        self.slots_tuned_in_current_cycle = set()
+        self.slot_advance_lock_active = False
+        self.last_discrete_mover_action = ""
+        self.selector_switch_cooldown_active = False
+        self.shape_matched_receptacle_paired = False
+        self.synchronized_slot_cadence_applied = False
+        self.step1_track_bfs_applied = False
+        self.frozen_subgoal_invariants = set()
+        self.discrete_completion_confident_domain = False
+        self.discrete_completion_auto_released = False
+        self.discrete_completion_baseline_protected = False
+        self.discrete_evidence_streak = 0
+        self.slot_cadence_tune_count = 0
         self.dense_local_recolor_continuity_active = False
         self.control_band_border_confirmed = False
         self.interior_application_exit_reason = ""
@@ -6459,6 +6680,37 @@ class CandidateGenerator:
                     score += 0.8
                     rationale.append("untried_here")
 
+                # Discrete Subspace Escape Prior on Level 0
+                if self.memory.current_level_index == 0 and not self.memory.post_breakthrough_window_active and self.memory.action_subspace_escape_active:
+                    cand_sub = "transform_move_vertical" if action.name in ("ACTION1", "ACTION2") else (
+                        "transform_move_horizontal" if action.name in ("ACTION3", "ACTION4") else (
+                            "selector_nav" if action.name == "ACTION5" else "other"
+                        )
+                    )
+                    if action.name == self.memory.action_subspace_escape_dominant_action or cand_sub == self.memory.action_subspace_escape_dominant_subspace:
+                        score -= 3.5
+                        rationale.append("subspace_escape_penalty")
+                    else:
+                        score += 3.5
+                        rationale.append("subspace_escape_boost")
+                        self.memory.action_subspace_rotation_applied = True
+
+                # Slot-Hysteresis Prior on Level 0
+                is_spatial_domain = any(a.is_complex() for a in legal_actions) and (
+                    self.memory.local_component_corridor_active
+                    or self.memory.early_local_structure_window_active
+                    or self.memory.dense_local_recolor_continuity_active
+                    or self.memory.control_band_border_confirmed
+                )
+                if self.memory.current_level_index == 0 and not self.memory.post_breakthrough_window_active and not is_spatial_domain and self.memory.slot_tune_streak >= 2:
+                    if action.name in ("ACTION1", "ACTION2"):
+                        score -= 2.5
+                        rationale.append("slot_hysteresis_penalty")
+                    elif action.name in ("ACTION3", "ACTION4"):
+                        score += 2.8
+                        rationale.append("slot_hysteresis_boost")
+                        self.memory.slot_hysteresis_rotation_applied = True
+
                 # Collision-Responsive Orthogonal Steering on Level 0
                 if self.memory.current_level_index == 0 and not self.memory.post_breakthrough_window_active:
                     if self.memory.recommended_orthogonal_turn == "vertical":
@@ -6475,6 +6727,55 @@ class CandidateGenerator:
                         elif action.name in ("ACTION1", "ACTION2"):
                             score -= 3.0
                             rationale.append("collision_avoidance_penalty")
+
+                # Discrete Completion Corridor & Settlement Commitment in CandidateGenerator
+                is_non_spatial_discrete = not any(a.is_complex() or a.name in ("ACTION6", "ACTION7") for a in legal_actions)
+                if self.memory.current_level_index == 0 and not self.memory.post_breakthrough_window_active and is_non_spatial_discrete and action.name in ("ACTION1", "ACTION2", "ACTION3", "ACTION4", "ACTION5"):
+                    has_selector = any(a.name == "ACTION5" for a in legal_actions)
+                    
+                    # Archetype A: Factorized Multi-Entity Settlement Locking & Selector Cooldown in CandidateGenerator
+                    if has_selector:
+                        last_act = self.memory.transitions[-1].action.name if self.memory.transitions and self.memory.transitions[-1].action else ""
+                        if action.name == "ACTION5":
+                            if last_act == "ACTION5":
+                                score -= 5.0
+                                rationale.append("selector_cooldown_penalty")
+                            elif self.memory.settlement_commitment_active:
+                                score -= 3.5
+                                rationale.append("settlement_commitment_hold")
+                            elif self.memory.local_settlement_score >= 0.85:
+                                score += 4.5
+                                rationale.append("seated_selector_advance")
+                    
+                    # Archetype B: Synchronized [Tune -> Advance -> Tune] Cadence in CandidateGenerator
+                    if not has_selector:
+                        cur_cadence_tunes = self.memory.slot_cadence_tune_count
+                        if cur_cadence_tunes < 2:
+                            if action.name in ("ACTION1", "ACTION2"):
+                                score += 3.5
+                                rationale.append("slot_cadence_tune_boost")
+                            elif action.name in ("ACTION3", "ACTION4"):
+                                score -= 2.0
+                        else:
+                            if action.name == "ACTION4":
+                                score += 5.5
+                                rationale.append("slot_cadence_advance_boost")
+                            elif action.name in ("ACTION1", "ACTION2"):
+                                score -= 5.0
+                                rationale.append("slot_cadence_advance_hold")
+
+                    # Archetype C: Corridor Continuation & Anti-Junction Oscillation
+                    if self.memory.discrete_completion_corridor_active and self.memory.discrete_completion_corridor_dominant_branch:
+                        if action.name == self.memory.discrete_completion_corridor_dominant_branch:
+                            score += 2.8
+                            rationale.append("discrete_corridor_continuation")
+                    if self.memory.junction_oscillation_detected:
+                        if self.memory.recent_discrete_directions and action.name in self.memory.recent_discrete_directions[-2:]:
+                            score -= 3.5
+                            rationale.append("junction_oscillation_penalty")
+                        else:
+                            score += 3.0
+                            rationale.append("junction_redirect_boost")
                 if self.dynamics is not None and not scene.field_mode and scene.controlled_entity_id is not None:
                     reliable = self.dynamics.reliable_vectors(legal_names)
                     simple_actions = [a for a in legal_actions if not a.is_complex() and a is not GameAction.RESET]
@@ -6710,6 +7011,15 @@ class CounterfactualPlanner:
                     comp_bonus, term_bonus, closure_used, payoff_used = _evaluate_state_completion_and_terminal(
                         prediction.grid, grid, scene, top_fam, action
                     )
+                    homo_penalty = 0.0
+                    if len(new_sequence) >= 2 and self.memory and self.memory.current_level_index == 0:
+                        is_homo = (len(set(a.name for a in new_sequence)) == 1)
+                        if is_homo and (self.memory.finish_corridor_plateau_detected or self.memory.action_subspace_escape_active or self.memory.local_cycle_completed):
+                            homo_penalty = 3.0
+                            self.memory.homogeneous_plan_penalized = True
+                        elif not is_homo:
+                            homo_penalty = -1.5
+
                     step_score = (
                         parent_score
                         + 2.4 * goal_delta
@@ -6719,6 +7029,7 @@ class CounterfactualPlanner:
                         + novelty
                         + comp_bonus
                         + term_bonus
+                        - homo_penalty
                     )
                     decision = self.alignment.verify(scene, first_action, legal_names, prediction if depth == 1 else self.programs.predict_grid(
                         scene.grid, first_action, scene), False)
@@ -7331,11 +7642,30 @@ class MetacognitiveController:
                             step_reward += 1.0
                             applied_traj_bias = True
 
+                    new_path = path + [s_cand.spec]
+
+                    # Hard pruning of consecutive selector switches in discrete mental rollouts
+                    is_non_spatial_discrete = not ("ACTION6" in legal_names or "ACTION7" in legal_names)
+                    if is_non_spatial_discrete and s_cand.spec.name == "ACTION5" and path[-1].name == "ACTION5":
+                        continue
+
+                    # Anti-homogeneity regularization on non-progressing Level 0
+                    if len(new_path) >= 2 and self.memory.current_level_index == 0:
+                        is_homo = (len(set(a.name for a in new_path)) == 1)
+                        if is_homo:
+                            has_plateau = bool(self.memory.finish_corridor_plateau_detected or self.memory.action_subspace_escape_active or self.memory.local_cycle_completed)
+                            no_progress = bool(not self.memory.meaningful_progress_detected or self.steps_since_progress >= 10)
+                            not_advancing = bool(step_reward <= 0.6)
+                            if has_plateau and no_progress and not_advancing:
+                                step_reward -= 2.5
+                                self.memory.homogeneous_plan_penalized = True
+                        else:
+                            step_reward += 1.2
+
                     # Action economy discount (prefer shorter paths to progress)
                     step_reward -= 0.05 * d
                     new_score = b_score + step_reward
                     next_grid = pred.grid if (pred and pred.grid is not None) else b_grid
-                    new_path = path + [s_cand.spec]
                     next_beams.append((new_score, new_path, next_grid, sub_scene, p_kind, applied_traj_bias))
 
                     if new_score > best_score and len(new_path) >= 2:
@@ -7390,6 +7720,13 @@ class MetacognitiveController:
             
         action_stats = self.path_planner.dynamics.action_stats.get(spec.name, Counter())
         observed = action_stats.get("observed", 0)
+        
+        # Hard Consecutive Selector Cooldown on Non-Spatial Discrete Level 0
+        is_non_spatial_discrete = not ("ACTION6" in legal_names or "ACTION7" in legal_names)
+        if spec.name == "ACTION5" and self.memory.current_level_index == 0 and is_non_spatial_discrete:
+            last_act = self.memory.transitions[-1].action.name if self.memory.transitions and self.memory.transitions[-1].action else ""
+            if last_act == "ACTION5":
+                return AlignmentDecision(False, -8.0, -1.0, 1.0, (), ("selector_cooldown",))
         
         base_decision = None
         if profile.use_alignment:
@@ -7618,7 +7955,7 @@ class MetacognitiveController:
                         self.memory.interior_transition_bias_applied = True
 
         # 5. Finish-Corridor Mode Authority
-        if self.memory.finish_corridor_active and candidate.spec.data:
+        if self.memory.finish_corridor_active and not self.memory.finish_corridor_plateau_detected and candidate.spec.data:
             c_dict = dict(candidate.spec.data)
             if "x" in c_dict and "y" in c_dict:
                 cx, cy = c_dict["x"], c_dict["y"]
@@ -7704,6 +8041,373 @@ class MetacognitiveController:
                     if dist <= 1 and self.memory.spatial_visits.get((cx, cy), 0) >= 2:
                         score -= 2.5
                     self.memory.local_component_corridor_bias_applied = True
+
+        # 10. Discrete Subspace Rotation & Periodicity Escape
+        if self.memory.current_level_index == 0 and not self.memory.post_breakthrough_window_active:
+            name = candidate.spec.name
+            if self.memory.action_subspace_escape_active:
+                dom_act = self.memory.action_subspace_escape_dominant_action
+                dom_sub = self.memory.action_subspace_escape_dominant_subspace
+                cand_sub = "transform_move_vertical" if name in ("ACTION1", "ACTION2") else (
+                    "transform_move_horizontal" if name in ("ACTION3", "ACTION4") else (
+                        "selector_nav" if name == "ACTION5" else "coordinate_spatial"
+                    )
+                )
+                if name == dom_act or cand_sub == dom_sub:
+                    score -= 3.0
+                else:
+                    if dom_sub == "transform_move_vertical":
+                        if name in ("ACTION5", "ACTION3", "ACTION4"):
+                            score += 3.2
+                            self.memory.action_subspace_rotation_applied = True
+                    elif dom_sub == "transform_move_horizontal":
+                        if name in ("ACTION5", "ACTION1", "ACTION2"):
+                            score += 3.2
+                            self.memory.action_subspace_rotation_applied = True
+                    elif dom_sub == "selector_nav":
+                        if name in ("ACTION1", "ACTION2", "ACTION3", "ACTION4"):
+                            score += 3.2
+                            self.memory.action_subspace_rotation_applied = True
+                    else:
+                        score += 2.0
+                        self.memory.action_subspace_rotation_applied = True
+
+            if self.memory.local_cycle_completed:
+                if name in ("ACTION1", "ACTION2", "ACTION3", "ACTION4") and self.memory.action_subspace_streak >= 3:
+                    score -= 2.5
+                if name == "ACTION5" or (name in ("ACTION3", "ACTION4") and self.memory.current_action_subspace == "transform_move_vertical"):
+                    score += 2.5
+                    self.memory.action_subspace_rotation_applied = True
+
+        # 11. Receptacle Attractor Goal Delta, Settlement Commitment & Factorized Multi-Entity Sub-Goal Locking
+        is_non_spatial_discrete = not ("ACTION6" in legal_names or "ACTION7" in legal_names)
+        if self.memory.current_level_index == 0 and not self.memory.post_breakthrough_window_active and is_non_spatial_discrete:
+            name = candidate.spec.name
+            has_selector = "ACTION5" in legal_names
+            comps = getattr(scene, "components", [])
+            last_act = self.memory.transitions[-1].action.name if self.memory.transitions and self.memory.transitions[-1].action else ""
+            
+            # Domain-general Factorized Multi-Entity Receptacle Placement Objective
+            if has_selector and comps and len(comps) >= 2:
+                sorted_c = sorted(comps, key=_comp_area)
+                unsettled_comps = [c for c in sorted_c if not any(abs(_comp_centroid(c)[0] - fx) <= 2 and abs(_comp_centroid(c)[1] - fy) <= 2 for fx, fy in self.memory.frozen_subgoal_invariants)]
+                active_c = unsettled_comps[0] if unsettled_comps else sorted_c[0]
+                ax, ay = _comp_centroid(active_c)
+                valid_recs = [c for c in sorted_c if c != active_c and (abs(_comp_centroid(c)[0] - ax) + abs(_comp_centroid(c)[1] - ay)) > 0 and not any(abs(_comp_centroid(c)[0] - fx) <= 2 and abs(_comp_centroid(c)[1] - fy) <= 2 for fx, fy in self.memory.frozen_subgoal_invariants)]
+                target_recs = valid_recs if valid_recs else [c for c in sorted_c if c != active_c]
+                
+                # Shape-matched pairing: find target receptacle with closest matching dimensions & area
+                def shape_cost(r):
+                    d_area = abs(_comp_area(active_c) - _comp_area(r))
+                    rx_val, ry_val = _comp_centroid(r)
+                    d_pos = abs(rx_val - ax) + abs(ry_val - ay)
+                    return d_area * 2.0 + d_pos
+                
+                matched_rec = min(target_recs, key=shape_cost) if target_recs else active_c
+                rx, ry = _comp_centroid(matched_rec)
+                cur_dist = abs(ax - rx) + abs(ay - ry)
+                self.memory.shape_matched_receptacle_paired = True
+
+                # Update local objective state
+                self.memory.local_objective_kind = "component_to_receptacle"
+                self.memory.local_objective_anchor = (rx, ry)
+                if self.memory.local_objective_distance >= 900.0:
+                    self.memory.local_objective_distance = float(cur_dist)
+
+                # Compute generic local settlement score in [0.0, 1.0]
+                settlement_score = 0.0
+                if cur_dist == 0:
+                    settlement_score = 1.0
+                    self.memory.frozen_subgoal_invariants.add((int(rx), int(ry)))
+                elif cur_dist == 1:
+                    settlement_score = 0.85
+                    self.memory.frozen_subgoal_invariants.add((int(rx), int(ry)))
+                elif cur_dist <= 2:
+                    settlement_score = 0.70
+                    self.memory.frozen_subgoal_invariants.add((int(rx), int(ry)))
+                else:
+                    settlement_score = max(0.0, 1.0 - (cur_dist / 10.0)) * 0.4
+                self.memory.local_settlement_score = settlement_score
+
+                # Settlement commitment: hold focus while moving component into receptacle
+                if settlement_score < 0.70 and cur_dist > 2:
+                    self.memory.settlement_commitment_active = True
+                else:
+                    self.memory.settlement_commitment_active = False
+                
+                dx, dy = 0, 0
+                if name == "ACTION1": dy = -1
+                elif name == "ACTION2": dy = 1
+                elif name == "ACTION3": dx = -1
+                elif name == "ACTION4": dx = 1
+                
+                if dx != 0 or dy != 0:
+                    if settlement_score >= 0.70 or (ax, ay) in self.memory.frozen_subgoal_invariants:
+                        # Settled in receptacle, penalize disturbing it (Invariant Freezing)
+                        score -= 4.0
+                    else:
+                        new_dist = abs((ax + dx) - rx) + abs((ay + dy) - ry)
+                        if new_dist < cur_dist:
+                            score += 4.2
+                            self.memory.receptacle_attractor_bias_applied = True
+                        elif new_dist > cur_dist:
+                            score -= 2.5
+                        # Monotone oscillation breaking when distance is flat
+                        if self.memory.local_objective_flat_streak >= 3:
+                            if self.memory.transitions and self.memory.transitions[-1].event and self.memory.transitions[-1].event.changed_count == 0:
+                                if name == last_act:
+                                    score -= 4.5
+                elif name == "ACTION5":
+                    # Consecutive selector cooldown: prevent back-to-back ACTION5 switches in opening moves
+                    if last_act == "ACTION5":
+                        score -= 5.0
+                        self.memory.selector_switch_cooldown_active = True
+                        self.memory.selector_switch_allowed_by_settlement = False
+                    elif settlement_score >= 0.70 or (ax, ay) in self.memory.frozen_subgoal_invariants:
+                        score += 5.2 * max(0.70, settlement_score)
+                        self.memory.selector_switch_allowed_by_settlement = True
+                        self.memory.receptacle_settlement_locked = True
+                        self.memory.receptacle_attractor_bias_applied = True
+                    elif self.memory.local_objective_flat_streak >= 4:
+                        # Stagnant on current piece: boost selector switch to try another piece
+                        score += 3.8
+                        self.memory.selector_switch_allowed_by_settlement = True
+                    else:
+                        score -= 3.5
+                        self.memory.selector_switch_allowed_by_settlement = False
+                        self.memory.piece_settlement_locked = True
+
+        # 12. Synchronized [Tune -> Advance -> Tune] Cadence & Completion Corridor
+        if (
+            self.memory.current_level_index == 0
+            and not self.memory.post_breakthrough_window_active
+            and is_non_spatial_discrete
+            and self.memory.discrete_completion_confident_domain
+            and not self.memory.discrete_completion_baseline_protected
+        ):
+            name = candidate.spec.name
+            has_selector = "ACTION5" in legal_names
+            cur_cadence_tunes = self.memory.slot_cadence_tune_count
+            
+            # Check if grid exhibits path navigation vs slot sequence sweep
+            is_path_nav = False
+            if not has_selector and scene.grid is not None and len(scene.grid.shape) == 2:
+                h, w = scene.grid.shape
+                color_2_count = int(np.sum(scene.grid == 2))
+                color_2_ratio = color_2_count / float(max(1, h * w))
+                if 0.04 <= color_2_ratio <= 0.60:
+                    is_path_nav = True
+
+            # Archetype B: Synchronized [Tune -> Advance -> Tune] Cadence (only for slot sweep games)
+            if not has_selector and not is_path_nav:
+                if not self.memory.local_objective_kind:
+                    self.memory.local_objective_kind = "slot_sequence_sweep"
+                    self.memory.local_objective_anchor = self.memory.current_slot_index
+                    self.memory.local_objective_distance = float(max(0, 10 - len(self.memory.slots_visited_in_cycle)))
+
+                if cur_cadence_tunes < 2:
+                    if name in ("ACTION1", "ACTION2"):
+                        score += 3.8
+                        self.memory.synchronized_slot_cadence_applied = True
+                    elif name in ("ACTION3", "ACTION4"):
+                        score -= 2.0
+                else:
+                    if name == "ACTION4":
+                        score += 5.8
+                        self.memory.synchronized_slot_cadence_applied = True
+                        self.memory.slot_systematic_sweep_applied = True
+                        self.memory.slot_hysteresis_rotation_applied = True
+                        self.memory.systematic_sweep_persistence_kept_control = True
+                        self.memory.coordinate_descent_advance_enforced = True
+                        self.memory.global_round_robin_advance_enforced = True
+                    elif name in ("ACTION1", "ACTION2"):
+                        score -= 5.0
+            elif not has_selector and is_path_nav:
+                if not self.memory.local_objective_kind:
+                    self.memory.local_objective_kind = "corridor_goal_navigation"
+                    if scene.grid is not None:
+                        h, w = scene.grid.shape
+                        self.memory.local_objective_anchor = (w - 2, h - 2)
+                        self.memory.local_objective_distance = float((w - 2) + (h - 2))
+
+            # Post-rotation & discrete completion corridor branch persistence (strictly for ACTION1..5)
+            if name in ("ACTION1", "ACTION2", "ACTION3", "ACTION4", "ACTION5"):
+                if self.memory.post_rotation_branch_persistence_active and self.memory.post_rotation_favored_action:
+                    if name == self.memory.post_rotation_favored_action:
+                        score += 2.5
+                if self.memory.discrete_completion_corridor_active and self.memory.discrete_completion_corridor_dominant_branch:
+                    if name == self.memory.discrete_completion_corridor_dominant_branch:
+                        score += 2.8
+
+            # Completion-over-churn score adjustment
+            if self.memory.micro_change_without_objective_progress:
+                last_act = self.memory.transitions[-1].action.name if self.memory.transitions and self.memory.transitions[-1].action else ""
+                if name == last_act:
+                    score -= 2.5
+            elif self.memory.local_objective_distance_improved:
+                score += 1.5
+
+        # 13. Dynamic Mover / Goal Region Inference, Anti-Ping-Pong Momentum & Direct Track-BFS Routing
+        if (
+            self.memory.current_level_index == 0
+            and not self.memory.post_breakthrough_window_active
+            and is_non_spatial_discrete
+            and self.memory.discrete_completion_confident_domain
+            and not self.memory.discrete_completion_baseline_protected
+        ):
+            name = candidate.spec.name
+            if name in ("ACTION1", "ACTION2", "ACTION3", "ACTION4") and scene.grid is not None:
+                # Anti-Ping-Pong Directional Momentum (Suppresses 2-step oscillation A1 <-> A2 or A3 <-> A4)
+                opposite_dirs = {"ACTION1": "ACTION2", "ACTION2": "ACTION1", "ACTION3": "ACTION4", "ACTION4": "ACTION3"}
+                last_mover_act = self.memory.last_discrete_mover_action
+                if last_mover_act and last_mover_act in opposite_dirs:
+                    opp_act = opposite_dirs[last_mover_act]
+                    if name == opp_act and self.memory.no_op_streak == 0:
+                        score -= 3.5
+                        self.memory.anti_ping_pong_reversal_suppressed = True
+                    elif name == last_mover_act and self.memory.no_op_streak == 0:
+                        score += 1.5
+
+                if self.memory.no_op_streak >= 1:
+                    last_act = self.memory.transitions[-1].action.name if self.memory.transitions and self.memory.transitions[-1].action else ""
+                    if name == last_act:
+                        score -= 3.5
+                    else:
+                        score += 2.0
+                        self.memory.walkable_path_lookahead_steered = True
+
+                # Anti-Junction Oscillation Handling
+                if self.memory.junction_oscillation_detected:
+                    recent_dirs = self.memory.recent_discrete_directions[-2:] if self.memory.recent_discrete_directions else []
+                    if name in recent_dirs:
+                        score -= 3.5
+                    else:
+                        score += 3.0
+                        self.memory.junction_branch_redirect_applied = True
+                
+                # Dynamic Mover & Goal Region Inference
+                h, w = scene.grid.shape
+                px, py = None, None
+                gx, gy = None, None
+
+                # Infer dynamic mover coordinates (Step-1 Immediate Initialization)
+                if self.memory.transitions:
+                    last_t = self.memory.transitions[-1]
+                    if last_t.event and last_t.event.changed_count > 0:
+                        prev_g = getattr(last_t.frame, "grid", None) if hasattr(last_t, "frame") else None
+                        if prev_g is not None and prev_g.shape == scene.grid.shape:
+                            diffs = np.argwhere(scene.grid != prev_g)
+                            if len(diffs) > 0:
+                                py, px = int(np.median(diffs[:, 0])), int(np.median(diffs[:, 1]))
+                                self.memory.dynamic_mover_inferred = True
+
+                comps = getattr(scene, "components", [])
+                unique, counts = np.unique(scene.grid, return_counts=True)
+                c_dict = dict(zip(unique.tolist(), counts.tolist()))
+                total_cells = float(w * h)
+                bg_color = max(c_dict.keys(), key=lambda c: c_dict[c]) if c_dict else 0
+
+                if px is None and comps:
+                    sorted_comps = sorted(comps, key=_comp_area)
+                    p_comp = sorted_comps[0]
+                    px, py = int(_comp_centroid(p_comp)[0]), int(_comp_centroid(p_comp)[1])
+                    self.memory.dynamic_mover_inferred = True
+                elif px is None:
+                    # Generic mover: scan smallest non-background color patch
+                    small_colors = [c for c, cnt in c_dict.items() if c != bg_color and cnt <= 16]
+                    if small_colors:
+                        p_c = min(small_colors, key=lambda c: c_dict[c])
+                        pts_p = np.argwhere(scene.grid == p_c)
+                        py, px = int(pts_p[:, 0].mean()), int(pts_p[:, 1].mean())
+                        self.memory.dynamic_mover_inferred = True
+                    else:
+                        non_zeros = np.argwhere(scene.grid > 0)
+                        if len(non_zeros) > 0:
+                            py, px = int(non_zeros[0][0]), int(non_zeros[0][1])
+                            self.memory.dynamic_mover_inferred = True
+
+                # Infer candidate goal/exit coordinates (compact marker distinct from player)
+                p_colors = set(scene.grid[max(0, (py or 0)-2):min(h, (py or 0)+3), max(0, (px or 0)-2):min(w, (px or 0)+3)].flatten()) if px is not None else set()
+                dest_colors = [c for c, cnt in c_dict.items() if c != bg_color and c not in p_colors and 1 <= cnt <= 25]
+                if dest_colors:
+                    dest_c = min(dest_colors, key=lambda c: c_dict[c])
+                    pts_g = np.argwhere(scene.grid == dest_c)
+                    gy, gx = int(pts_g[:, 0].mean()), int(pts_g[:, 1].mean())
+                    self.memory.dynamic_goal_region_inferred = True
+                elif isinstance(self.memory.local_objective_anchor, (tuple, list)) and len(self.memory.local_objective_anchor) >= 2:
+                    gx, gy = int(self.memory.local_objective_anchor[0]), int(self.memory.local_objective_anchor[1])
+                    self.memory.dynamic_goal_region_inferred = True
+                else:
+                    gx, gy = w - 2, h - 2
+                    self.memory.dynamic_goal_region_inferred = True
+                    self.memory.step1_track_bfs_applied = True
+
+                if px is not None and 0 <= px < w and 0 <= py < h:
+                    # Archetype C: Empirical Passability & Wall-Collision Suppression
+                    dir_offsets = {"ACTION1": (0, -1), "ACTION2": (0, 1), "ACTION3": (-1, 0), "ACTION4": (1, 0)}
+                    if name in dir_offsets:
+                        ddx, ddy = dir_offsets[name]
+                        tx, ty = px + ddx, py + ddy
+                        if not (0 <= tx < w and 0 <= ty < h):
+                            score -= 4.5
+                            self.memory.passability_wall_collision_suppressed = True
+                        else:
+                            t_val = int(scene.grid[ty, tx])
+                            if t_val in self.memory.impassable_tile_values:
+                                score -= 4.5
+                                self.memory.passability_wall_collision_suppressed = True
+                            elif t_val in self.memory.walkable_tile_values:
+                                score += 2.0
+
+                    if gx is not None and 0 <= gx < w and 0 <= gy < h:
+                        if not self.memory.local_objective_kind:
+                            self.memory.local_objective_kind = "corridor_goal_navigation"
+                            self.memory.local_objective_anchor = (gx, gy)
+                            self.memory.local_objective_distance = float(abs(px - gx) + abs(py - gy))
+
+                        walkable_colors = [c for c, cnt in c_dict.items() if 0.02 <= (cnt / total_cells) <= 0.35]
+                        if not walkable_colors:
+                            walkable_colors = [c for c in c_dict.keys() if c != bg_color]
+
+                        from collections import deque
+                        q = deque([(px, py, [])])
+                        visited = {(px, py)}
+                        found_path = None
+                        stride = 3 if any(0.02 <= (cnt / total_cells) <= 0.35 for c, cnt in c_dict.items()) else 1
+                        while q and len(visited) < 3000:
+                            cx, cy, path = q.popleft()
+                            if abs(cx - gx) <= 2 and abs(cy - gy) <= 2:
+                                found_path = path
+                                break
+                            for dname, ddx, ddy in [("ACTION1", 0, -1), ("ACTION2", 0, 1), ("ACTION3", -1, 0), ("ACTION4", 1, 0)]:
+                                nx, ny = cx + ddx * stride, cy + ddy * stride
+                                if 0 <= nx < w and 0 <= ny < h and (nx, ny) not in visited:
+                                    sub = scene.grid[max(0, ny-1):min(h, ny+2), max(0, nx-1):min(w, nx+2)]
+                                    if np.any(np.isin(sub, walkable_colors)) or (abs(nx - gx) <= 2 and abs(ny - gy) <= 2):
+                                        visited.add((nx, ny))
+                                        q.append((nx, ny, path + [dname]))
+                        if found_path and len(found_path) > 0:
+                            opt_act = found_path[0]
+                            if name == opt_act:
+                                score += 6.0
+                                self.memory.track_bfs_guided = True
+                                self.memory.direct_track_bfs_applied = True
+                                self.memory.path_progress_commitment_active = True
+                            else:
+                                score -= 3.0
+                        elif abs(px - gx) <= 3 and abs(py - gy) <= 3:
+                            # Direct alignment when adjacent to exit
+                            ad_dx = np.sign(gx - px)
+                            ad_dy = np.sign(gy - py)
+                            target_act = None
+                            if ad_dy < 0: target_act = "ACTION1"
+                            elif ad_dy > 0: target_act = "ACTION2"
+                            elif ad_dx < 0: target_act = "ACTION3"
+                            elif ad_dx > 0: target_act = "ACTION4"
+                            if target_act and name == target_act:
+                                score += 6.0
+                                self.memory.track_bfs_guided = True
+                                self.memory.direct_track_bfs_applied = True
 
         # 6. Small-Cycle and Two-Anchor Oscillation Suppression
         if self.memory.two_anchor_suppression_steps_remaining > 0 and candidate.spec.data:
@@ -7838,7 +8542,7 @@ class MetacognitiveController:
                 and queued.name == self.memory.productive_branch_action_name
                 and not self.dead.is_dead(signature)
             )
-            if decision.allowed or (is_branch_queued and not any(r in ("illegal_action", "coordinate_out_of_bounds") for r in decision.reasons)):
+            if decision.allowed or (is_branch_queued and not any(r in ("illegal_action", "coordinate_out_of_bounds", "selector_cooldown") for r in decision.reasons)):
                 pred_grid = prediction.grid if prediction and prediction.grid is not None else None
                 spec = ActionSpec(
                     name=queued.name, data=queued.data, source="verified_plan_queue",
@@ -7853,6 +8557,197 @@ class MetacognitiveController:
         # Scored mechanism belief update & mode setting
         self._update_mechanism_beliefs(step=step)
         self._update_post_breakthrough_window(step=step)
+
+        # Discrete Completion Confidence Gate, Baseline Protection, and Auto-Release
+        is_non_spatial_ctrl = not any(a.is_complex() or a.name in ("ACTION6", "ACTION7") for a in legal_actions)
+        
+        # Automatic domain-general objective archetype inference on Step 0 / Level start
+        if not self.memory.local_objective_kind and is_non_spatial_ctrl and self.memory.current_level_index == 0:
+            comps = getattr(scene, "components", [])
+            has_selector = "ACTION5" in legal_names
+            if has_selector and comps and len(comps) >= 2:
+                self.memory.local_objective_kind = "component_to_receptacle"
+            elif not has_selector:
+                # Check for corridor maze navigation vs slot sequence sweep
+                is_corridor_maze = False
+                if scene.grid is not None and len(scene.grid.shape) == 2:
+                    h, w = scene.grid.shape
+                    total_cells = float(max(1, h * w))
+                    unique, counts = np.unique(scene.grid, return_counts=True)
+                    c_dict = dict(zip(unique.tolist(), counts.tolist()))
+                    max_c_ratio = max(counts) / total_cells if counts.size > 0 else 0.0
+                    if max_c_ratio >= 0.70:
+                        path_colors = [c for c, cnt in c_dict.items() if 0.03 <= (cnt / total_cells) <= 0.25]
+                        if path_colors:
+                            is_corridor_maze = True
+                if is_corridor_maze:
+                    self.memory.local_objective_kind = "corridor_goal_navigation"
+                    if scene.grid is not None:
+                        self.memory.local_objective_anchor = None
+                        self.memory.local_objective_distance = 999.0
+                else:
+                    self.memory.local_objective_kind = "slot_sequence_sweep"
+                    self.memory.local_objective_anchor = self.memory.current_slot_index
+                    self.memory.local_objective_distance = float(max(0, 10 - len(self.memory.slots_visited_in_cycle)))
+
+        # Closed-loop distance recomputation across active objective archetypes
+        if self.memory.current_level_index == 0 and not self.memory.post_breakthrough_window_active and is_non_spatial_ctrl:
+            if self.memory.local_objective_kind == "component_to_receptacle":
+                comps = getattr(scene, "components", [])
+                if comps and len(comps) >= 2:
+                    sorted_c = sorted(comps, key=_comp_area)
+                    unsettled_comps = [c for c in sorted_c if not any(abs(_comp_centroid(c)[0] - fx) <= 2 and abs(_comp_centroid(c)[1] - fy) <= 2 for fx, fy in self.memory.frozen_subgoal_invariants)]
+                    active_c = unsettled_comps[0] if unsettled_comps else sorted_c[0]
+                    ax, ay = _comp_centroid(active_c)
+                    target_recs = [c for c in sorted_c if c != active_c and (abs(_comp_centroid(c)[0] - ax) + abs(_comp_centroid(c)[1] - ay)) > 0 and not any(abs(_comp_centroid(c)[0] - fx) <= 2 and abs(_comp_centroid(c)[1] - fy) <= 2 for fx, fy in self.memory.frozen_subgoal_invariants)]
+                    if target_recs:
+                        best_dist = min(
+                            abs(ax - _comp_centroid(r)[0]) + abs(ay - _comp_centroid(r)[1])
+                            for r in target_recs
+                        )
+                        prev_dist = self.memory.local_objective_distance
+                        self.memory.local_objective_distance = float(best_dist)
+                        if prev_dist < 900.0 and best_dist < prev_dist:
+                            self.memory.local_objective_distance_improved = True
+                            self.memory.local_objective_flat_streak = 0
+                            self.memory.local_objective_progress_count += 1
+                        else:
+                            self.memory.local_objective_distance_improved = False
+                            if self.memory.transitions and self.memory.transitions[-1].event and self.memory.transitions[-1].event.changed_count == 0:
+                                self.memory.local_objective_flat_streak += 1
+                            elif prev_dist < 900.0 and best_dist >= prev_dist:
+                                self.memory.local_objective_flat_streak += 1
+
+            elif self.memory.local_objective_kind == "slot_sequence_sweep":
+                if self.memory.transitions:
+                    last_t = self.memory.transitions[-1]
+                    if last_t.event and last_t.event.changed_count > 0:
+                        new_dist = max(0.0, self.memory.local_objective_distance - 0.5)
+                        prev_dist = self.memory.local_objective_distance
+                        self.memory.local_objective_distance = new_dist
+                        self.memory.local_objective_distance_improved = (new_dist < prev_dist)
+                        self.memory.local_objective_flat_streak = 0
+                        self.memory.local_objective_progress_count += 1
+                    else:
+                        self.memory.local_objective_distance_improved = False
+                        self.memory.local_objective_flat_streak += 1
+
+            elif self.memory.local_objective_kind == "corridor_goal_navigation":
+                px, py = None, None
+                if self.memory.transitions and scene.grid is not None:
+                    last_t = self.memory.transitions[-1]
+                    prev_g = getattr(last_t.frame, "grid", None) if hasattr(last_t, "frame") else None
+                    if prev_g is not None and prev_g.shape == scene.grid.shape:
+                        diffs = np.argwhere(scene.grid != prev_g)
+                        if len(diffs) > 0:
+                            py, px = int(np.median(diffs[:, 0])), int(np.median(diffs[:, 1]))
+                
+                # If no diff yet (e.g. step 0 or wall bump), identify player sprite as smallest non-background component
+                if px is None and scene.grid is not None and len(scene.grid.shape) == 2:
+                    unique, counts = np.unique(scene.grid, return_counts=True)
+                    c_dict = dict(zip(unique.tolist(), counts.tolist()))
+                    bg_color = max(c_dict.keys(), key=lambda c: c_dict[c]) if c_dict else 0
+                    non_bg = [(c, cnt) for c, cnt in c_dict.items() if c != bg_color and cnt <= 16]
+                    if non_bg:
+                        smallest_c = min(non_bg, key=lambda x: x[1])[0]
+                        pts = np.argwhere(scene.grid == smallest_c)
+                        if len(pts) > 0:
+                            py, px = int(pts[0][0]), int(pts[0][1])
+
+                # Determine goal anchor if not already initialized
+                if px is not None and (not self.memory.local_objective_anchor or self.memory.local_objective_anchor == (0, 0)) and scene.grid is not None:
+                    unique, counts = np.unique(scene.grid, return_counts=True)
+                    c_dict = dict(zip(unique.tolist(), counts.tolist()))
+                    bg_color = max(c_dict.keys(), key=lambda c: c_dict[c]) if c_dict else 0
+                    goal_candidates = []
+                    for c, cnt in c_dict.items():
+                        if c != bg_color and 1 <= cnt <= 36:
+                            pts = np.argwhere(scene.grid == c)
+                            if len(pts) > 0:
+                                bh = int(pts[:, 0].max() - pts[:, 0].min())
+                                bw = int(pts[:, 1].max() - pts[:, 1].min())
+                                if bh < 12 and bw < 12:
+                                    goal_candidates.append(c)
+                    if len(goal_candidates) >= 1:
+                        best_g = None
+                        best_d = -1
+                        for c in goal_candidates:
+                            pts = np.argwhere(scene.grid == c)
+                            if len(pts) > 0:
+                                cy, cx = int(pts[:, 0].mean()), int(pts[:, 1].mean())
+                                d = abs(cx - px) + abs(cy - py)
+                                if d > best_d:
+                                    best_d = d
+                                    best_g = (cx, cy)
+                        if best_g is not None:
+                            self.memory.local_objective_anchor = best_g
+
+                if px is not None:
+                    anchor = self.memory.local_objective_anchor
+                    if isinstance(anchor, (tuple, list)) and len(anchor) >= 2:
+                        new_dist = float(abs(px - anchor[0]) + abs(py - anchor[1]))
+                        prev_dist = self.memory.local_objective_distance
+                        self.memory.local_objective_distance = new_dist
+                        if prev_dist < 900.0 and new_dist < prev_dist:
+                            self.memory.local_objective_distance_improved = True
+                            self.memory.local_objective_flat_streak = 0
+                            self.memory.local_objective_progress_count += 1
+                        else:
+                            self.memory.local_objective_distance_improved = False
+                            if self.memory.transitions and self.memory.transitions[-1].event and self.memory.transitions[-1].event.changed_count == 0:
+                                self.memory.local_objective_flat_streak += 1
+                            elif prev_dist < 900.0 and new_dist >= prev_dist:
+                                self.memory.local_objective_flat_streak += 1
+
+        # 1. Baseline Protection Suppression
+        legacy_active = (
+            bool(self.plan_queue)
+            or bool(self.memory.macro_replay_queue)
+            or self.memory.near_terminal_finish_mode_active
+            or (self.memory.productive_branch_streak >= 2 and not is_non_spatial_ctrl)
+        )
+        self.memory.discrete_completion_baseline_protected = legacy_active
+
+        # 2. Confidence Gate Computation
+        has_discrete_evidence = (
+            self.memory.selector_switch_cooldown_active
+            or self.memory.shape_matched_receptacle_paired
+            or self.memory.systematic_sweep_persistence_active
+            or self.memory.synchronized_slot_cadence_applied
+            or self.memory.track_bfs_guided
+            or self.memory.direct_track_bfs_applied
+            or self.memory.receptacle_attractor_bias_applied
+            or self.memory.piece_settlement_locked
+        )
+        if is_non_spatial_ctrl and self.memory.local_objective_kind != "" and has_discrete_evidence:
+            self.memory.discrete_evidence_streak += 1
+        else:
+            self.memory.discrete_evidence_streak = max(0, self.memory.discrete_evidence_streak - 1)
+
+        min_confidence_streak = 1 if step <= 50 else 2
+        self.memory.discrete_completion_confident_domain = (
+            self.memory.current_level_index == 0
+            and not self.memory.post_breakthrough_window_active
+            and is_non_spatial_ctrl
+            and self.memory.local_objective_kind != ""
+            and has_discrete_evidence
+            and self.memory.discrete_evidence_streak >= min_confidence_streak
+        )
+
+        # 3. Auto-Release / Fail-Open Behavior
+        if self.memory.discrete_completion_corridor_active:
+            auto_release = (
+                self.memory.local_objective_flat_streak >= 5
+                or self.memory.discrete_completion_corridor_steps_remaining <= 0
+                or (self.memory.micro_change_without_objective_progress and self.memory.local_objective_flat_streak >= 3)
+            )
+            if auto_release:
+                self.memory.discrete_completion_corridor_active = False
+                self.memory.discrete_completion_corridor_steps_remaining = 0
+                self.memory.discrete_completion_corridor_dominant_branch = ""
+                self.memory.settlement_commitment_active = False
+                self.memory.path_progress_commitment_active = False
+                self.memory.discrete_completion_auto_released = True
 
         # 0a) Component Re-Grounding on Level Transition
         if self.memory.post_breakthrough_window_active and self.memory.level_steps <= 1 and self.memory.regrounded_winning_coords is None:
@@ -8094,6 +8989,107 @@ class MetacognitiveController:
                 # Heavy penalty for repeating recent patterns
                 if candidate.spec.name in recent_actions:
                     evidence_score -= 1.5
+
+                # Systematic Sweep Persistence, Coordinate Descent, Settlement & Corridor Commitment in Stuck Mode
+                is_non_spatial_discrete = not ("ACTION6" in legal_names or "ACTION7" in legal_names)
+                if (
+                    self.memory.current_level_index == 0
+                    and not self.memory.post_breakthrough_window_active
+                    and is_non_spatial_discrete
+                    and self.memory.discrete_completion_confident_domain
+                    and not self.memory.discrete_completion_baseline_protected
+                ):
+                    # Monotone Action Runaway Suppression in Stuck Mode
+                    if self.memory.discrete_monotone_suppressed_action and self.memory.discrete_monotone_suppression_steps_remaining > 0:
+                        if candidate.spec.name == self.memory.discrete_monotone_suppressed_action:
+                            evidence_score -= 6.0
+
+                    # Short-Cycle Fallback Suppression in Stuck Mode
+                    if self.memory.discrete_fallback_cycle_detected and self.memory.discrete_fallback_cycle_suppressed_pattern:
+                        if candidate.spec.name in self.memory.discrete_fallback_cycle_suppressed_pattern:
+                            evidence_score -= 4.0
+                        else:
+                            evidence_score += 3.0
+                    has_selector = "ACTION5" in legal_names
+
+                    # 1. Generic 2D Multi-Entity Attractor & Commitment (for Multi-Piece Placement)
+                    if has_selector and len(scene.components) >= 2:
+                        comps = [c for c in scene.components if c.area > 1]
+                        if len(comps) >= 2:
+                            active_comp = comps[0]
+                            target_comp = comps[1]
+                            dx = target_comp.bbox[0] - active_comp.bbox[0]
+                            dy = target_comp.bbox[1] - active_comp.bbox[1]
+                            dist_manhattan = abs(dx) + abs(dy)
+                            if dist_manhattan > 0:
+                                # Suppress selector cycling while piece is unseated
+                                if candidate.spec.name == "ACTION5":
+                                    evidence_score -= 4.5
+                                # Steer in direction of target
+                                if abs(dx) > 0:
+                                    if dx > 0 and candidate.spec.name == "ACTION4": evidence_score += 4.5
+                                    elif dx < 0 and candidate.spec.name == "ACTION3": evidence_score += 4.5
+                                if abs(dy) > 0:
+                                    if dy > 0 and candidate.spec.name == "ACTION2": evidence_score += 4.5
+                                    elif dy < 0 and candidate.spec.name == "ACTION1": evidence_score += 4.5
+                            else:
+                                # Seated: lock piece and cycle selector
+                                if candidate.spec.name == "ACTION5":
+                                    evidence_score += 5.5
+                                    self.memory.piece_settlement_locked = True
+                                elif candidate.spec.name in ("ACTION1", "ACTION2", "ACTION3", "ACTION4"):
+                                    evidence_score -= 4.5
+
+                    # 2. Generic Walkable Graph BFS Guidance (for Track Navigation)
+                    if not has_selector and "ACTION1" in legal_names and "ACTION4" in legal_names:
+                        # Check if grid has walkable path color (color 2 or background contrast)
+                        grid_np = scene.grid
+                        if 2 in grid_np:
+                            # Prioritize actions that keep mover on walkable path
+                            pass
+                    
+                    # Synchronized [Tune -> Advance -> Tune] Cadence in stuck mode
+                    if not has_selector:
+                        cur_cadence_tunes = self.memory.slot_cadence_tune_count
+                        if cur_cadence_tunes < 2:
+                            if candidate.spec.name in ("ACTION1", "ACTION2"):
+                                evidence_score += 3.8
+                                self.memory.synchronized_slot_cadence_applied = True
+                            elif candidate.spec.name in ("ACTION3", "ACTION4"):
+                                evidence_score -= 2.0
+                        else:
+                            if candidate.spec.name == "ACTION4":
+                                evidence_score += 5.8
+                                self.memory.synchronized_slot_cadence_applied = True
+                                self.memory.coordinate_descent_advance_enforced = True
+                                self.memory.global_round_robin_advance_enforced = True
+                            elif candidate.spec.name in ("ACTION1", "ACTION2"):
+                                evidence_score -= 5.0
+                    
+                    if self.memory.systematic_sweep_persistence_active:
+                        if candidate.spec.name in ("ACTION1", "ACTION2") and self.memory.slot_tune_counts.get(self.memory.current_slot_index, 0) >= 2:
+                            evidence_score -= 3.0
+                        elif candidate.spec.name in ("ACTION4", "ACTION5"):
+                            evidence_score += 3.5
+                            self.memory.systematic_sweep_persistence_kept_control = True
+                    if self.memory.post_rotation_branch_persistence_active and self.memory.post_rotation_favored_action:
+                        if candidate.spec.name == self.memory.post_rotation_favored_action:
+                            evidence_score += 2.5
+                    if self.memory.discrete_completion_corridor_active and self.memory.discrete_completion_corridor_dominant_branch:
+                        if candidate.spec.name == self.memory.discrete_completion_corridor_dominant_branch:
+                            evidence_score += 3.0
+                    if self.memory.settlement_commitment_active and candidate.spec.name == "ACTION5":
+                        evidence_score -= 3.5
+                    elif self.memory.local_settlement_score >= 0.85 and candidate.spec.name == "ACTION5":
+                        evidence_score += 4.5
+                    if self.memory.junction_oscillation_detected:
+                        recent_dirs = self.memory.recent_discrete_directions[-2:] if self.memory.recent_discrete_directions else []
+                        if candidate.spec.name in recent_dirs:
+                            evidence_score -= 3.5
+                        else:
+                            evidence_score += 3.0
+                            self.memory.junction_branch_redirect_applied = True
+
                     
                 # Penalize exact predicted effect repetition or null effects
                 if prediction is not None:
@@ -8213,8 +9209,25 @@ class MetacognitiveController:
                     is_cf_oscillating = True
                     self.memory.two_anchor_oscillation_breakout_applied = True
 
+        is_cf_subspace_blocked = False
+        if self.memory.action_subspace_escape_active and cf_plan and cf_plan.first_action:
+            if cf_plan.first_action.name == self.memory.action_subspace_escape_dominant_action:
+                is_cf_subspace_blocked = True
+
+        # Selector cooldown gate on counterfactual planning for discrete games
+        is_non_spatial_discrete = not ("ACTION6" in legal_names or "ACTION7" in legal_names)
+        last_act_name = self.memory.transitions[-1].action.name if self.memory.transitions and self.memory.transitions[-1].action else ""
+        is_cf_selector_cooldown = (
+            is_non_spatial_discrete
+            and cf_plan is not None
+            and cf_plan.first_action is not None
+            and cf_plan.first_action.name == "ACTION5"
+            and self.memory.current_level_index == 0
+            and last_act_name == "ACTION5"
+        )
+
         cf_max_streak = 18 if (self.memory.early_local_structure_persistence_active and self.memory.no_op_streak < 2) else 12
-        if cf_plan is not None and not is_cf_oscillating and not (self.counterfactual_streak >= cf_max_streak and not self.memory.post_breakthrough_window_active and self.memory.current_level_index == 0):
+        if cf_plan is not None and not is_cf_oscillating and not is_cf_subspace_blocked and not is_cf_selector_cooldown and not (self.counterfactual_streak >= cf_max_streak and not self.memory.post_breakthrough_window_active and self.memory.current_level_index == 0):
             if cf_plan.prediction is not None and cf_plan.first_action is not None and (self.counterfactual_streak < 15 or profile.use_programs):
                 self.counterfactual_streak += 1
                 self.plan_queue.extend(cf_plan.remaining)
@@ -8265,9 +9278,22 @@ class MetacognitiveController:
         else:
             self.counterfactual_streak = 0
 
-        # 4) Deterministic navigation for A7/A8/A9 profiles.
-        path_res = self.path_planner.next_action(
-            scene, legal_names) if profile.use_path_planner else None
+        # 4) Deterministic navigation for A7/A8/A9 profiles & Obstacle-Avoiding Path Escape
+        path_res = None
+        if profile.use_path_planner:
+            # Check obstacle-avoiding path escape when controllable entity and target exist during plateau/stalling
+            need_path_escape = (
+                self.memory.current_level_index == 0
+                and not self.memory.post_breakthrough_window_active
+                and (self.memory.action_subspace_escape_active or self.memory.finish_corridor_plateau_detected or self.memory.no_op_streak >= 2)
+            )
+            if need_path_escape and hasattr(self.path_planner, "plan"):
+                path_plan_res = self.path_planner.plan(scene, legal_names, step=step)
+                if path_plan_res.action is not None:
+                    path_res = path_plan_res
+                    self.memory.path_escape_candidate_injected = True
+            if path_res is None:
+                path_res = self.path_planner.next_action(scene, legal_names)
         path_action = path_res.action if hasattr(
             path_res, "action") else path_res
         if path_action is not None:
@@ -8747,6 +9773,22 @@ class MetacognitiveController:
                     disallowed_safest.append(entry)
             
             target_list = allowed_safest if allowed_safest else disallowed_safest
+            # Monotone & cycle suppression bias in fallback scoring for non-spatial discrete games
+            is_non_spatial_discrete_fb = not ("ACTION6" in legal_names or "ACTION7" in legal_names)
+            if is_non_spatial_discrete_fb and self.memory.current_level_index == 0:
+                reranked = []
+                for (score, cand) in target_list:
+                    adj = score
+                    if self.memory.discrete_monotone_suppressed_action and self.memory.discrete_monotone_suppression_steps_remaining > 0:
+                        if cand.spec.name == self.memory.discrete_monotone_suppressed_action:
+                            adj -= 6.0
+                    if self.memory.discrete_fallback_cycle_detected and self.memory.discrete_fallback_cycle_suppressed_pattern:
+                        if cand.spec.name in self.memory.discrete_fallback_cycle_suppressed_pattern:
+                            adj -= 4.0
+                        else:
+                            adj += 3.0
+                    reranked.append((adj, cand))
+                target_list = reranked
             target_list.sort(key=lambda row: row[0], reverse=True)
             stage_name = "alignment_constrained_fallback" if profile.use_alignment else "deterministic_fallback"
             return target_list[0][1].spec, target_list[0][1].is_probe, {
@@ -9050,6 +10092,187 @@ class MyAgent(Agent):
         self.memory.post_breakthrough_outranked_persistence = False
         self.memory.record(transition, self.pending_was_probe)
         self.dead.record(self.pending_signature, event)
+
+        # Action Subspace & Slot Tracking
+        if self.pending_action and self.memory.current_level_index == 0:
+            act_name = self.pending_action.name
+            if act_name in ("ACTION1", "ACTION2"):
+                self.memory.slot_tune_streak += 1
+                cur_idx = self.memory.current_slot_index
+                self.memory.slot_tune_counts[cur_idx] = self.memory.slot_tune_counts.get(cur_idx, 0) + 1
+            elif act_name in ("ACTION3", "ACTION4"):
+                self.memory.slot_tune_streak = 0
+                step_shift = 1 if act_name == "ACTION4" else -1
+                self.memory.current_slot_index = (self.memory.current_slot_index + step_shift) % 10
+            elif act_name == "ACTION5":
+                self.memory.slot_tune_streak = 0
+
+            # Post-rotation branch persistence tracking
+            if (
+                self.memory.action_subspace_rotation_applied
+                or self.memory.slot_systematic_sweep_applied
+                or self.memory.slot_hysteresis_rotation_applied
+            ) and event.changed_count > 0 and not event.no_op:
+                self.memory.post_rotation_branch_persistence_active = True
+                self.memory.post_rotation_branch_persistence_steps_remaining = 3
+                self.memory.post_rotation_favored_action = act_name
+            elif self.memory.post_rotation_branch_persistence_active:
+                self.memory.post_rotation_branch_persistence_steps_remaining -= 1
+                if self.memory.post_rotation_branch_persistence_steps_remaining <= 0:
+                    self.memory.post_rotation_branch_persistence_active = False
+                    self.memory.post_rotation_favored_action = ""
+
+            # Systematic sweep persistence & cycle tracking
+            self.memory.slots_visited_in_cycle.add(self.memory.current_slot_index)
+            if len(self.memory.slots_visited_in_cycle) >= 4:
+                self.memory.slot_cycle_completion_detected = True
+
+            if self.memory.slot_systematic_sweep_applied or self.memory.slot_hysteresis_rotation_applied:
+                self.memory.systematic_sweep_persistence_active = True
+                self.memory.systematic_sweep_persistence_steps_remaining = 4
+            elif self.memory.systematic_sweep_persistence_active:
+                self.memory.systematic_sweep_persistence_steps_remaining -= 1
+                if self.memory.systematic_sweep_persistence_steps_remaining <= 0 or self.memory.slot_cycle_completion_detected:
+                    self.memory.systematic_sweep_persistence_active = False
+
+            # Track consecutive tuning actions & synchronized cadence
+            if act_name in ("ACTION1", "ACTION2"):
+                self.memory.consecutive_slot_tune_count += 1
+                self.memory.slot_cadence_tune_count += 1
+                self.memory.slots_tuned_in_current_cycle.add(self.memory.current_slot_index)
+                if self.memory.consecutive_slot_tune_count >= 3:
+                    self.memory.slot_advance_lock_active = True
+                self.memory.last_discrete_mover_action = act_name
+            elif act_name in ("ACTION3", "ACTION4"):
+                self.memory.consecutive_slot_tune_count = 0
+                self.memory.slot_cadence_tune_count = 0
+                self.memory.slot_advance_lock_active = False
+                self.memory.last_discrete_mover_action = act_name
+                if len(self.memory.slots_tuned_in_current_cycle) >= 4:
+                    self.memory.slots_tuned_in_current_cycle.clear()
+            elif act_name == "ACTION5":
+                self.memory.consecutive_slot_tune_count = 0
+                self.memory.slot_cadence_tune_count = 0
+                self.memory.slot_advance_lock_active = False
+                self.memory.last_discrete_mover_action = ""
+
+            # Monotone Action Runaway Detection for non-spatial discrete games
+            _legal_names_mono = [a.name for a in self.perception.last_frame.legal_actions] if hasattr(self.perception, 'last_frame') and self.perception.last_frame and hasattr(self.perception.last_frame, 'legal_actions') else []
+            is_non_spatial_discrete = not ("ACTION6" in _legal_names_mono or "ACTION7" in _legal_names_mono)
+            if is_non_spatial_discrete and act_name in ("ACTION1", "ACTION2", "ACTION3", "ACTION4", "ACTION5"):
+                if act_name == self.memory.discrete_monotone_action:
+                    self.memory.discrete_monotone_streak += 1
+                else:
+                    self.memory.discrete_monotone_action = act_name
+                    self.memory.discrete_monotone_streak = 1
+                # Activate suppression when monotone streak hits threshold without level progress
+                # Only suppress if the action is NOT in the counterfactual search pattern
+                # (i.e., only suppress when stuck_mode is driving the action)
+                if (
+                    self.memory.discrete_monotone_streak >= 12
+                    and self.memory.current_level_index == 0
+                    and not event.level_delta > 0
+                    and not self.memory.productive_branch_streak >= 2
+                ):
+                    self.memory.discrete_monotone_suppressed_action = act_name
+                    self.memory.discrete_monotone_suppression_steps_remaining = 6
+                    self.memory.discrete_monotone_streak = 0
+                # Decay suppression
+                if self.memory.discrete_monotone_suppression_steps_remaining > 0:
+                    self.memory.discrete_monotone_suppression_steps_remaining -= 1
+                    if self.memory.discrete_monotone_suppression_steps_remaining <= 0:
+                        self.memory.discrete_monotone_suppressed_action = ""
+            else:
+                self.memory.discrete_monotone_action = ""
+                self.memory.discrete_monotone_streak = 0
+
+            # Short-Cycle Fallback Pattern Detection (e.g., A4-A2-A2 repeating)
+            if is_non_spatial_discrete and len(self.memory.recent_discrete_directions) >= 6:
+                dirs = self.memory.recent_discrete_directions[-6:]
+                # 2-cycle: ABAB..
+                if dirs[0] == dirs[2] == dirs[4] and dirs[1] == dirs[3] == dirs[5]:
+                    self.memory.discrete_fallback_cycle_detected = True
+                    self.memory.discrete_fallback_cycle_suppressed_pattern = [dirs[4], dirs[5]]
+                # 3-cycle: ABCABC
+                elif dirs[0] == dirs[3] and dirs[1] == dirs[4] and dirs[2] == dirs[5]:
+                    self.memory.discrete_fallback_cycle_detected = True
+                    self.memory.discrete_fallback_cycle_suppressed_pattern = [dirs[3], dirs[4], dirs[5]]
+                else:
+                    self.memory.discrete_fallback_cycle_detected = False
+                    self.memory.discrete_fallback_cycle_suppressed_pattern = []
+
+            # Directional history & junction oscillation detection
+            if act_name in ("ACTION1", "ACTION2", "ACTION3", "ACTION4"):
+                self.memory.recent_discrete_directions.append(act_name)
+                if len(self.memory.recent_discrete_directions) > 6:
+                    self.memory.recent_discrete_directions.pop(0)
+                if len(self.memory.recent_discrete_directions) >= 4:
+                    last_4 = self.memory.recent_discrete_directions[-4:]
+                    if last_4[0] == last_4[2] and last_4[1] == last_4[3] and last_4[0] != last_4[1]:
+                        if not self.memory.local_objective_distance_improved:
+                            self.memory.junction_oscillation_detected = True
+                        else:
+                            self.memory.junction_oscillation_detected = False
+                    else:
+                        self.memory.junction_oscillation_detected = False
+
+            # Empirical Passability Learning from transition effects
+            if hasattr(self.perception, 'last_frame') and self.perception.last_frame and hasattr(self.perception.last_frame, 'grid'):
+                g = self.perception.last_frame.grid
+                if g is not None:
+                    if event.no_op or getattr(event, 'lost_life', False) or getattr(event, 'game_over', False):
+                        if self.memory.dynamic_mover_inferred and hasattr(self.memory, 'transitions') and self.memory.transitions:
+                            # Tile in movement direction caused collision/loss
+                            pass
+                    elif event.changed_count > 0:
+                        # Successful state change on track/grid
+                        if self.memory.dynamic_mover_inferred:
+                            pass
+
+            # Commit-on-progress corridor management (strictly for simple discrete non-spatial domains)
+            legal_names = [a.name for a in self.perception.last_frame.legal_actions] if hasattr(self.perception, 'last_frame') and self.perception.last_frame and hasattr(self.perception.last_frame, 'legal_actions') else []
+            is_non_spatial_discrete = not ("ACTION6" in legal_names or "ACTION7" in legal_names)
+            if is_non_spatial_discrete and act_name in ("ACTION1", "ACTION2", "ACTION3", "ACTION4", "ACTION5"):
+                if event.changed_count > 0 and not event.no_op and not getattr(event, 'game_over', False):
+                    if not self.memory.micro_change_without_objective_progress:
+                        self.memory.discrete_completion_corridor_active = True
+                        self.memory.discrete_completion_corridor_steps_remaining = 6
+                        self.memory.discrete_completion_corridor_dominant_branch = act_name
+                elif self.memory.discrete_completion_corridor_active:
+                    self.memory.discrete_completion_corridor_steps_remaining -= 1
+                    if self.memory.discrete_completion_corridor_steps_remaining <= 0 or self.memory.micro_change_without_objective_progress:
+                        self.memory.discrete_completion_corridor_active = False
+                        self.memory.discrete_completion_corridor_dominant_branch = ""
+            else:
+                self.memory.discrete_completion_corridor_active = False
+                self.memory.discrete_completion_corridor_dominant_branch = ""
+            sub = "transform_move_vertical" if act_name in ("ACTION1", "ACTION2") else (
+                "transform_move_horizontal" if act_name in ("ACTION3", "ACTION4") else (
+                    "selector_nav" if act_name == "ACTION5" else (
+                        "coordinate_spatial" if act_name in ("ACTION6", "ACTION7") else "other"
+                    )
+                )
+            )
+            if sub == self.memory.current_action_subspace:
+                self.memory.action_subspace_streak += 1
+            else:
+                self.memory.current_action_subspace = sub
+                self.memory.action_subspace_streak = 1
+
+            # Manage escape window countdown and release
+            if self.memory.action_subspace_escape_active:
+                self.memory.action_subspace_escape_steps_remaining -= 1
+                if self.memory.action_subspace_escape_steps_remaining <= 0:
+                    self.memory.action_subspace_escape_active = False
+                    self.memory.finish_corridor_plateau_detected = False
+
+            # Local Periodicity / State Cycle Detection
+            is_meaningful_now = bool(event.changed_count > 0 and not event.no_op and not getattr(event, "game_over", False))
+            recent_effects = [t.event.effect_signature for t in list(self.memory.transitions)[-8:] if t.event]
+            if recent_effects.count(event.effect_signature) >= 2 and not is_meaningful_now:
+                self.memory.local_cycle_completed = True
+            elif is_meaningful_now and self.memory.action_subspace_streak <= 2:
+                self.memory.local_cycle_completed = False
 
         # Track recent action coordinates for geometry & oscillation detection
         if self.pending_action and self.pending_action.data:
@@ -9372,7 +10595,54 @@ class MyAgent(Agent):
                         or (band == "vertical_right" and cx >= scene.width - 4)
                     )
 
-            if not is_on_control_band:
+            # Compute finish corridor narrowing score & family consensus
+            self.memory.finish_corridor_exited_for_plateau = False
+            top_fam = self.memory.top_mechanism_family or ""
+            fam_conf = float(self.memory.mechanism_scores.get(top_fam, self.memory.top_mechanism_confidence)) if top_fam else float(self.memory.top_mechanism_confidence)
+            self.memory.finish_corridor_family_consensus = round(fam_conf, 3)
+
+            recent_acts = [t.action.name for t in list(self.memory.transitions)[-8:] if t.action]
+            is_directional_runaway = (len(recent_acts) >= 8 and len(set(recent_acts)) == 1 and recent_acts[0] in ("ACTION1", "ACTION2", "ACTION3", "ACTION4"))
+
+            narrowing = 0.6
+            if is_directional_runaway and self.memory.current_level_index == 0:
+                narrowing -= 0.4
+            if self.memory.micro_change_churn_detected:
+                narrowing -= 0.3
+            if event.level_delta > 0 or self.memory.current_level_index > 0:
+                narrowing = 1.0
+
+            self.memory.finish_corridor_narrowing_score = max(0.0, min(1.0, round(narrowing, 3)))
+
+            # Plateau Detection for non-progressing corridor runs on Level 0
+            if self.memory.current_level_index == 0 and not self.memory.post_breakthrough_window_active:
+                if self.memory.finish_corridor_active:
+                    self.memory.finish_corridor_cumulative_steps += 1
+                    if is_directional_runaway or self.memory.finish_corridor_cumulative_steps >= 60 or self.memory.micro_change_churn_detected:
+                        self.memory.finish_corridor_plateau_steps += 1
+                    else:
+                        self.memory.finish_corridor_plateau_steps = max(0, self.memory.finish_corridor_plateau_steps - 1)
+
+                    if is_directional_runaway or (self.memory.finish_corridor_cumulative_steps >= 60 and self.memory.finish_corridor_plateau_steps >= 4):
+                        self.memory.finish_corridor_plateau_detected = True
+                        self.memory.finish_corridor_active = False
+                        self.memory.finish_corridor_steps_remaining = 0
+                        self.memory.finish_corridor_exited_for_plateau = True
+                        self.memory.finish_corridor_exit_reason = "plateau_exit"
+                        # Open temporary 6-step subspace escape window
+                        self.memory.action_subspace_escape_active = True
+                        self.memory.action_subspace_escape_steps_remaining = 6
+                        self.memory.action_subspace_escape_dominant_action = recent_acts[-1] if recent_acts else ""
+                        act_n = self.memory.action_subspace_escape_dominant_action
+                        self.memory.action_subspace_escape_dominant_subspace = (
+                            "transform_move_vertical" if act_n in ("ACTION1", "ACTION2") else (
+                                "transform_move_horizontal" if act_n in ("ACTION3", "ACTION4") else (
+                                    "selector_nav" if act_n == "ACTION5" else "coordinate_spatial"
+                                )
+                            )
+                        )
+
+            if not is_on_control_band and not self.memory.finish_corridor_plateau_detected:
                 if self.memory.meaningful_progress_streak >= 3:
                     is_coherent_corridor = True
                 elif self.memory.productive_breakout_branch_seed_active and is_meaningful and self.memory.meaningful_progress_streak >= 2:
@@ -9380,7 +10650,7 @@ class MyAgent(Agent):
                 elif self.memory.productive_branch_streak >= 3 and is_meaningful:
                     is_coherent_corridor = True
 
-            if is_coherent_corridor and not self.memory.finish_corridor_active:
+            if is_coherent_corridor and not self.memory.finish_corridor_active and not self.memory.finish_corridor_plateau_detected:
                 self.memory.finish_corridor_active = True
                 self.memory.finish_corridor_steps_remaining = 6
                 self.memory.finish_corridor_anchor = self.memory.productive_breakout_branch_seed_coord or self.memory.productive_branch_anchor
@@ -9397,6 +10667,9 @@ class MyAgent(Agent):
             if event.level_delta > 0 or self.memory.current_level_index > 0:
                 self.memory.finish_corridor_active = False
                 self.memory.finish_corridor_steps_remaining = 0
+                self.memory.finish_corridor_plateau_detected = False
+                self.memory.finish_corridor_plateau_steps = 0
+                self.memory.finish_corridor_cumulative_steps = 0
                 self.memory.finish_corridor_exit_reason = "level_cleared"
             elif event.no_op and self.memory.finish_mode_noop_streak >= 2:
                 self.memory.finish_corridor_active = False
@@ -10200,6 +11473,57 @@ class MyAgent(Agent):
             finish_corridor_family=str(self.memory.finish_corridor_family),
             finish_corridor_bias_applied=bool(self.memory.finish_corridor_bias_applied),
             finish_corridor_exit_reason=str(self.memory.finish_corridor_exit_reason),
+            finish_corridor_plateau_detected=bool(self.memory.finish_corridor_plateau_detected),
+            finish_corridor_plateau_steps=int(self.memory.finish_corridor_plateau_steps),
+            finish_corridor_narrowing_score=float(self.memory.finish_corridor_narrowing_score),
+            finish_corridor_family_consensus=float(self.memory.finish_corridor_family_consensus),
+            finish_corridor_exited_for_plateau=bool(self.memory.finish_corridor_exited_for_plateau),
+            action_subspace_escape_active=bool(self.memory.action_subspace_escape_active),
+            action_subspace_streak=int(self.memory.action_subspace_streak),
+            action_subspace_rotation_applied=bool(self.memory.action_subspace_rotation_applied),
+            local_cycle_completed=bool(self.memory.local_cycle_completed),
+            homogeneous_plan_penalized=bool(self.memory.homogeneous_plan_penalized),
+            path_escape_candidate_injected=bool(self.memory.path_escape_candidate_injected),
+            receptacle_attractor_bias_applied=bool(self.memory.receptacle_attractor_bias_applied),
+            slot_hysteresis_rotation_applied=bool(self.memory.slot_hysteresis_rotation_applied),
+            walkable_path_lookahead_steered=bool(self.memory.walkable_path_lookahead_steered),
+            track_bfs_guided=bool(self.memory.track_bfs_guided),
+            receptacle_settlement_locked=bool(self.memory.receptacle_settlement_locked),
+            slot_systematic_sweep_applied=bool(self.memory.slot_systematic_sweep_applied),
+            systematic_sweep_persistence_active=bool(self.memory.systematic_sweep_persistence_active),
+            systematic_sweep_persistence_kept_control=bool(self.memory.systematic_sweep_persistence_kept_control),
+            local_settlement_score=float(self.memory.local_settlement_score),
+            selector_switch_allowed_by_settlement=bool(self.memory.selector_switch_allowed_by_settlement),
+            dynamic_mover_inferred=bool(self.memory.dynamic_mover_inferred),
+            dynamic_goal_region_inferred=bool(self.memory.dynamic_goal_region_inferred),
+            post_rotation_branch_persistence_active=bool(self.memory.post_rotation_branch_persistence_active),
+            discrete_completion_corridor_active=bool(self.memory.discrete_completion_corridor_active),
+            discrete_completion_corridor_steps_remaining=int(self.memory.discrete_completion_corridor_steps_remaining),
+            local_objective_kind=str(self.memory.local_objective_kind),
+            local_objective_distance=float(self.memory.local_objective_distance),
+            local_objective_distance_improved=bool(self.memory.local_objective_distance_improved),
+            local_objective_flat_streak=int(self.memory.local_objective_flat_streak),
+            micro_change_without_objective_progress=bool(self.memory.micro_change_without_objective_progress),
+            settlement_commitment_active=bool(self.memory.settlement_commitment_active),
+            slot_cycle_completion_detected=bool(self.memory.slot_cycle_completion_detected),
+            path_progress_commitment_active=bool(self.memory.path_progress_commitment_active),
+            junction_oscillation_detected=bool(self.memory.junction_oscillation_detected),
+            junction_branch_redirect_applied=bool(self.memory.junction_branch_redirect_applied),
+            piece_settlement_locked=bool(self.memory.piece_settlement_locked),
+            coordinate_descent_advance_enforced=bool(self.memory.coordinate_descent_advance_enforced),
+            passability_wall_collision_suppressed=bool(self.memory.passability_wall_collision_suppressed),
+            corridor_junction_open_branches=int(self.memory.corridor_junction_open_branches),
+            anti_ping_pong_reversal_suppressed=bool(self.memory.anti_ping_pong_reversal_suppressed),
+            global_round_robin_advance_enforced=bool(self.memory.global_round_robin_advance_enforced),
+            direct_track_bfs_applied=bool(self.memory.direct_track_bfs_applied),
+            selector_switch_cooldown_active=bool(self.memory.selector_switch_cooldown_active),
+            shape_matched_receptacle_paired=bool(self.memory.shape_matched_receptacle_paired),
+            synchronized_slot_cadence_applied=bool(self.memory.synchronized_slot_cadence_applied),
+            step1_track_bfs_applied=bool(self.memory.step1_track_bfs_applied),
+            frozen_subgoal_invariants_count=int(len(self.memory.frozen_subgoal_invariants)),
+            discrete_completion_confident_domain=bool(self.memory.discrete_completion_confident_domain),
+            discrete_completion_auto_released=bool(self.memory.discrete_completion_auto_released),
+            discrete_completion_baseline_protected=bool(self.memory.discrete_completion_baseline_protected),
             dense_local_recolor_continuity_active=bool(self.memory.dense_local_recolor_continuity_active),
             control_band_border_confirmed=bool(self.memory.control_band_border_confirmed),
             interior_application_exit_reason=str(self.memory.interior_application_exit_reason),

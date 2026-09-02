@@ -23,7 +23,13 @@ reference/
 
 # Local traces, logs, and datasets
 traces/
+traces_archive/
 notebooks/log_output/
 agent/*.tgz
 datasets/
 diff_changes.txt
+*.log
+submission.parquet
+kaggle_output/
+diagnostics/
+scratch/
