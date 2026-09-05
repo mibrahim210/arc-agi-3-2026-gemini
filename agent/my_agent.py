@@ -8662,30 +8662,63 @@ class MetacognitiveController:
         # Closed-loop distance recomputation across active objective archetypes
         if self.memory.current_level_index == 0 and not self.memory.post_breakthrough_window_active and is_non_spatial_ctrl:
             if self.memory.local_objective_kind == "component_to_receptacle":
-                comps = getattr(scene, "components", [])
-                if comps and len(comps) >= 2:
-                    sorted_c = sorted(comps, key=_comp_area)
-                    unsettled_comps = [c for c in sorted_c if not any(abs(_comp_centroid(c)[0] - fx) <= 2 and abs(_comp_centroid(c)[1] - fy) <= 2 for fx, fy in self.memory.frozen_subgoal_invariants)]
-                    active_c = unsettled_comps[0] if unsettled_comps else sorted_c[0]
-                    ax, ay = _comp_centroid(active_c)
-                    target_recs = [c for c in sorted_c if c != active_c and (abs(_comp_centroid(c)[0] - ax) + abs(_comp_centroid(c)[1] - ay)) > 0 and not any(abs(_comp_centroid(c)[0] - fx) <= 2 and abs(_comp_centroid(c)[1] - fy) <= 2 for fx, fy in self.memory.frozen_subgoal_invariants)]
-                    if target_recs:
-                        best_dist = min(
-                            abs(ax - _comp_centroid(r)[0]) + abs(ay - _comp_centroid(r)[1])
-                            for r in target_recs
-                        )
-                        prev_dist = self.memory.local_objective_distance
-                        self.memory.local_objective_distance = float(best_dist)
-                        if prev_dist < 900.0 and best_dist < prev_dist:
-                            self.memory.local_objective_distance_improved = True
-                            self.memory.local_objective_flat_streak = 0
-                            self.memory.local_objective_progress_count += 1
-                        else:
-                            self.memory.local_objective_distance_improved = False
-                            if self.memory.transitions and self.memory.transitions[-1].event and self.memory.transitions[-1].event.changed_count == 0:
-                                self.memory.local_objective_flat_streak += 1
-                            elif prev_dist < 900.0 and best_dist >= prev_dist:
-                                self.memory.local_objective_flat_streak += 1
+                best_dist = None
+                if scene.grid is not None and "ACTION5" in legal_names:
+                    u, counts = np.unique(scene.grid, return_counts=True)
+                    c_dict = dict(zip(u.tolist(), counts.tolist()))
+                    bg_color = max(c_dict.keys(), key=lambda c: c_dict[c])
+                    piece_colors = [c for c, cnt in c_dict.items() if c != bg_color and cnt >= 15]
+                    border_candidates = []
+                    for pc in piece_colors:
+                        pts = np.argwhere(scene.grid == pc)
+                        for py_v, px_v in pts:
+                            nhood = scene.grid[max(0, py_v-1):min(scene.grid.shape[0], py_v+2), max(0, px_v-1):min(scene.grid.shape[1], px_v+2)]
+                            other = nhood[(nhood != bg_color) & (nhood != pc)]
+                            border_candidates.extend(other.tolist())
+                    b_counts = Counter(border_candidates)
+                    border_candidates_filtered = [c for c, freq in b_counts.items() if c not in piece_colors and c != 0]
+                    border_color = max(border_candidates_filtered, key=lambda c: b_counts[c]) if border_candidates_filtered else 4
+                    
+                    piece_targets = {}
+                    for c in piece_colors:
+                        pts = [tuple(p) for p in np.argwhere(scene.grid == c).tolist()]
+                        marker_set = {pt for pt in pts if np.any(scene.grid[max(0, pt[0]-1):min(scene.grid.shape[0], pt[0]+2), max(0, pt[1]-1):min(scene.grid.shape[1], pt[1]+2)] == border_color)}
+                        body_set = set(pts) - marker_set
+                        if len(marker_set) >= 2 and len(body_set) >= 15:
+                            m_arr = np.array(list(marker_set))
+                            b_arr = np.array(list(body_set))
+                            m_cy, m_cx = m_arr[:, 0].mean(), m_arr[:, 1].mean()
+                            b_cy, b_cx = b_arr[:, 0].mean(), b_arr[:, 1].mean()
+                            piece_targets[c] = abs(b_cx - m_cx) + abs(b_cy - m_cy)
+                    if piece_targets:
+                        best_dist = sum(piece_targets.values())
+
+                if best_dist is None:
+                    comps = getattr(scene, "components", [])
+                    if comps and len(comps) >= 2:
+                        sorted_c = sorted(comps, key=_comp_area)
+                        unsettled_comps = [c for c in sorted_c if not any(abs(_comp_centroid(c)[0] - fx) <= 2 and abs(_comp_centroid(c)[1] - fy) <= 2 for fx, fy in self.memory.frozen_subgoal_invariants)]
+                        active_c = unsettled_comps[0] if unsettled_comps else sorted_c[0]
+                        ax, ay = _comp_centroid(active_c)
+                        target_recs = [c for c in sorted_c if c != active_c and (abs(_comp_centroid(c)[0] - ax) + abs(_comp_centroid(c)[1] - ay)) > 0 and not any(abs(_comp_centroid(c)[0] - fx) <= 2 and abs(_comp_centroid(c)[1] - fy) <= 2 for fx, fy in self.memory.frozen_subgoal_invariants)]
+                        if target_recs:
+                            best_dist = min(
+                                abs(ax - _comp_centroid(r)[0]) + abs(ay - _comp_centroid(r)[1])
+                                for r in target_recs
+                            )
+                if best_dist is not None:
+                    prev_dist = self.memory.local_objective_distance
+                    self.memory.local_objective_distance = float(best_dist)
+                    if prev_dist < 900.0 and best_dist < prev_dist:
+                        self.memory.local_objective_distance_improved = True
+                        self.memory.local_objective_flat_streak = 0
+                        self.memory.local_objective_progress_count += 1
+                    else:
+                        self.memory.local_objective_distance_improved = False
+                        if self.memory.transitions and self.memory.transitions[-1].event and self.memory.transitions[-1].event.changed_count == 0:
+                            self.memory.local_objective_flat_streak += 1
+                        elif prev_dist < 900.0 and best_dist >= prev_dist:
+                            self.memory.local_objective_flat_streak += 1
 
             elif self.memory.local_objective_kind == "slot_sequence_sweep":
                 prev_dist = self.memory.local_objective_distance
@@ -8815,6 +8848,186 @@ class MetacognitiveController:
                 "bfs_recommended_action": bfs_act,
                 "local_objective_distance": self.memory.local_objective_distance,
             }
+
+        # Direct Factorized Piece-Placement Navigation Dispatch
+        if (
+            self.memory.local_objective_kind == "component_to_receptacle"
+            and "ACTION5" in legal_names
+            and not ("ACTION6" in legal_names or "ACTION7" in legal_names)
+            and scene.grid is not None
+            and len(scene.grid.shape) == 2
+        ):
+            grid = scene.grid
+            u, counts = np.unique(grid, return_counts=True)
+            c_dict = dict(zip(u.tolist(), counts.tolist()))
+            bg_color = max(c_dict.keys(), key=lambda c: c_dict[c])
+            piece_colors = [c for c, cnt in c_dict.items() if c != bg_color and cnt >= 15]
+
+            border_candidates = []
+            for pc in piece_colors:
+                pts = np.argwhere(grid == pc)
+                for py_v, px_v in pts:
+                    nhood = grid[max(0, py_v-1):min(grid.shape[0], py_v+2), max(0, px_v-1):min(grid.shape[1], px_v+2)]
+                    other = nhood[(nhood != bg_color) & (nhood != pc)]
+                    border_candidates.extend(other.tolist())
+            b_counts = Counter(border_candidates)
+            border_candidates_filtered = [c for c, freq in b_counts.items() if c not in piece_colors and c != 0]
+            border_color = max(border_candidates_filtered, key=lambda c: b_counts[c]) if border_candidates_filtered else 4
+
+            piece_targets = {}
+            for c in piece_colors:
+                pts = [tuple(p) for p in np.argwhere(grid == c).tolist()]
+                marker_set = {pt for pt in pts if np.any(grid[max(0, pt[0]-1):min(grid.shape[0], pt[0]+2), max(0, pt[1]-1):min(grid.shape[1], pt[1]+2)] == border_color)}
+                body_set = set(pts) - marker_set
+                if len(marker_set) >= 2 and len(body_set) >= 15:
+                    m_arr = np.array(list(marker_set))
+                    b_arr = np.array(list(body_set))
+                    m_cy, m_cx = m_arr[:, 0].mean(), m_arr[:, 1].mean()
+                    b_cy, b_cx = b_arr[:, 0].mean(), b_arr[:, 1].mean()
+                    piece_targets[c] = {
+                        "piece_center": (b_cx, b_cy),
+                        "target_center": (m_cx, m_cy),
+                        "dist": abs(b_cx - m_cx) + abs(b_cy - m_cy),
+                        "dx": m_cx - b_cx,
+                        "dy": m_cy - b_cy,
+                    }
+
+            if piece_targets:
+                active_color = None
+                dot_pts = np.argwhere(grid == 0)
+                if len(dot_pts) > 0:
+                    dot_y, dot_x = dot_pts[0][0], dot_pts[0][1]
+                    for c, info in piece_targets.items():
+                        px_c, py_c = info["piece_center"]
+                        if abs(dot_x - px_c) <= 12 and abs(dot_y - py_c) <= 12:
+                            active_color = c
+                            break
+
+                if active_color is None and self.memory.transitions:
+                    last_t = self.memory.transitions[-1]
+                    prev_g = getattr(last_t.frame, "grid", None) if hasattr(last_t, "frame") else None
+                    if prev_g is not None and prev_g.shape == grid.shape:
+                        diffs = np.argwhere(grid != prev_g)
+                        for c in piece_targets:
+                            if np.any(grid[diffs[:, 0], diffs[:, 1]] == c):
+                                active_color = c
+                                break
+
+                if active_color is None:
+                    active_color = list(piece_targets.keys())[0]
+
+                cur_info = piece_targets.get(active_color)
+                if not cur_info:
+                    chosen_piece_act = "ACTION5"
+                else:
+                    p_dx, p_dy = cur_info["dx"], cur_info["dy"]
+                    if abs(p_dx) < 1.5 and abs(p_dy) < 1.5:
+                        chosen_piece_act = "ACTION5"
+                    elif abs(p_dx) >= 1.5:
+                        chosen_piece_act = "ACTION4" if p_dx > 0 else "ACTION3"
+                    elif abs(p_dy) >= 1.5:
+                        chosen_piece_act = "ACTION2" if p_dy > 0 else "ACTION1"
+                    else:
+                        chosen_piece_act = "ACTION5"
+
+                if chosen_piece_act in legal_names:
+                    self.plan_queue.clear()
+                    spec = ActionSpec(
+                        name=chosen_piece_act, source="factorized_piece_placement",
+                        predicted_effect="align_active_piece_to_receptacle", score=50.0,
+                    )
+                    return spec, False, {
+                        "stage": "factorized_piece_placement",
+                        "final_action_source": "factorized_piece_placement",
+                        "active_piece_color": active_color,
+                        "piece_action": chosen_piece_act,
+                        "local_objective_distance": self.memory.local_objective_distance,
+                    }
+
+        # Direct Symbolic Rule Rewriting Dispatch
+        if (
+            self.memory.local_objective_kind == "slot_sequence_sweep"
+            and "ACTION5" not in legal_names
+            and not ("ACTION6" in legal_names or "ACTION7" in legal_names)
+            and scene.grid is not None
+            and len(scene.grid.shape) == 2
+        ):
+            grid = scene.grid
+            h, w = grid.shape
+            u, counts = np.unique(grid, return_counts=True)
+            c_dict = dict(zip(u.tolist(), counts.tolist()))
+            bg_color = max(c_dict.keys(), key=lambda c: c_dict[c])
+
+            # Detect arrow color in upper region (y < 35)
+            arrow_runs = []
+            for c in c_dict:
+                if c == bg_color:
+                    continue
+                pts = np.argwhere(grid[:35, :] == c)
+                runs = []
+                for y in np.unique(pts[:, 0]):
+                    xs = pts[pts[:, 0] == y, 1]
+                    diffs = np.diff(np.sort(xs))
+                    splits = np.where(diffs > 1)[0]
+                    for run in np.split(np.sort(xs), splits + 1):
+                        if 3 <= len(run) <= 6:
+                            runs.append((y, run[0], run[-1]))
+                if len(runs) >= 4:
+                    arrow_runs = runs
+                    break
+
+            if arrow_runs:
+                rules = []
+                for y_arr, xs, xe in arrow_runs:
+                    y0 = y_arr - 2
+                    l_box = (grid[y0:y0+5, xs-6:xs-1] == 5).astype(int)
+                    r_box = (grid[y0:y0+5, xe+2:xe+7] == 5).astype(int)
+                    rules.append((l_box, r_box))
+
+                slot_xs = [15, 22, 29, 36, 43]
+                targets = [(grid[41:46, sx:sx+5] == 5).astype(int) for sx in slot_xs]
+                slots = [(grid[52:57, sx:sx+5] == 5).astype(int) for sx in slot_xs]
+
+                desired = []
+                for t in targets:
+                    matched_r = None
+                    for l_box, r_box in rules:
+                        if any(np.array_equal(np.rot90(t, k), l_box) for k in range(4)):
+                            matched_r = r_box
+                            break
+                    desired.append(matched_r)
+
+                matched_slots = [any(np.array_equal(np.rot90(slots[i], k), desired[i]) for k in range(4)) if desired[i] is not None else False for i in range(5)]
+                unmatched_count = 5 - sum(matched_slots)
+                self.memory.local_objective_distance = float(unmatched_count)
+
+                if not all(matched_slots):
+                    notch_xs = np.argwhere(grid[48, :] == 0).flatten()
+                    if len(notch_xs) > 0:
+                        mean_nx = notch_xs.mean()
+                        active_slot_idx = int(np.argmin([abs(sx + 2 - mean_nx) for sx in slot_xs]))
+                    else:
+                        active_slot_idx = self.memory.current_slot_index % 5
+
+                    if not matched_slots[active_slot_idx]:
+                        chosen_rewrite_act = "ACTION2"
+                    else:
+                        chosen_rewrite_act = "ACTION4"
+
+                    if chosen_rewrite_act in legal_names:
+                        self.plan_queue.clear()
+                        spec = ActionSpec(
+                            name=chosen_rewrite_act, source="symbolic_rule_rewriting",
+                            predicted_effect="rewrite_slot_symbol_to_rule_output", score=50.0,
+                        )
+                        return spec, False, {
+                            "stage": "symbolic_rule_rewriting",
+                            "final_action_source": "symbolic_rule_rewriting",
+                            "active_slot_index": active_slot_idx,
+                            "unmatched_count": unmatched_count,
+                            "rewrite_action": chosen_rewrite_act,
+                            "local_objective_distance": self.memory.local_objective_distance,
+                        }
 
         # 1. Baseline Protection Suppression
         legacy_active = (
