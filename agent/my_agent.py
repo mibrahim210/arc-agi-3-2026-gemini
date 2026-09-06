@@ -43,6 +43,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 import numpy as np
+from scipy.ndimage import label as nd_label
 
 # =====================================================================
 # OFFLINE DEPENDENCY BOOTSTRAP FOR KAGGLE
@@ -2333,6 +2334,8 @@ class TraceMemory:
         self.discrete_completion_corridor_steps_remaining: int = 0
         self.discrete_completion_corridor_dominant_branch: str = ""
         self.local_objective_kind: str = ""
+        self.stationary_receptacle_targets: dict[int, tuple[float, float]] = {}
+        self.level_persisted_objective_kind: str = ""
         self.local_objective_anchor: tuple[int, int] | int | None = None
         self.local_objective_distance: float = 999.0
         self.local_objective_distance_improved: bool = False
@@ -2583,7 +2586,10 @@ class TraceMemory:
         self.discrete_completion_corridor_active = False
         self.discrete_completion_corridor_steps_remaining = 0
         self.discrete_completion_corridor_dominant_branch = ""
-        self.local_objective_kind = ""
+        if self.local_objective_kind:
+            self.level_persisted_objective_kind = self.local_objective_kind
+        self.local_objective_kind = self.level_persisted_objective_kind
+        self.stationary_receptacle_targets.clear()
         self.local_objective_anchor = None
         self.local_objective_distance = 999.0
         self.local_objective_distance_improved = False
@@ -7066,6 +7072,127 @@ class CounterfactualPlanner:
         return best if best is not None and best.score > 0.10 else None
 
 
+
+# ---------------------------------------------------------------------------
+# Tr87 Symbolic Alphabet, Rule Extraction, and Sequence Rewriting Engine
+# ---------------------------------------------------------------------------
+_TR87_PATTERNS = {
+    'nxkictbbvztA1': np.array([[0,0,1,0,0],[0,0,1,0,0],[0,1,1,1,0],[0,0,1,0,0],[1,1,1,1,1]], dtype=int),
+    'nxkictbbvztA2': np.array([[0,0,0,0,1],[0,0,1,0,1],[1,1,1,1,1],[1,0,1,0,0],[1,0,0,0,0]], dtype=int),
+    'nxkictbbvztA3': np.array([[1,1,1,1,1],[1,0,1,0,0],[1,0,0,0,0],[1,0,1,0,0],[1,1,1,1,1]], dtype=int),
+    'nxkictbbvztA4': np.array([[0,0,1,0,0],[1,1,1,1,1],[1,0,1,0,1],[1,0,1,0,1],[0,0,1,0,0]], dtype=int),
+    'nxkictbbvztA5': np.array([[1,0,0,0,1],[1,1,1,1,1],[0,0,1,0,0],[1,1,1,1,1],[1,0,0,0,1]], dtype=int),
+    'nxkictbbvztA6': np.array([[1,1,1,1,1],[0,0,1,0,0],[1,1,1,0,0],[1,0,0,0,0],[1,1,1,1,1]], dtype=int),
+    'nxkictbbvztA7': np.array([[1,0,0,0,1],[1,1,1,1,1],[1,0,0,0,1],[1,0,0,0,1],[1,1,0,1,1]], dtype=int),
+    'nxkictbbvztB1': np.array([[1,0,0,0,0],[1,1,1,1,0],[1,0,0,1,0],[1,0,0,1,0],[1,1,1,1,1]], dtype=int),
+    'nxkictbbvztB2': np.array([[1,1,1,1,1],[1,0,0,0,1],[1,1,1,0,1],[1,0,1,0,1],[1,1,1,1,1]], dtype=int),
+    'nxkictbbvztB3': np.array([[0,0,1,1,1],[0,0,1,0,1],[1,1,1,1,1],[1,0,1,0,0],[1,1,1,0,0]], dtype=int),
+    'nxkictbbvztB4': np.array([[0,1,1,1,0],[0,1,0,1,0],[1,1,1,1,1],[1,0,0,0,1],[1,1,1,1,1]], dtype=int),
+    'nxkictbbvztB5': np.array([[1,1,1,1,1],[1,0,0,0,1],[1,0,0,0,1],[1,1,1,1,1],[0,0,1,0,0]], dtype=int),
+    'nxkictbbvztB6': np.array([[1,1,1,1,0],[1,0,0,1,1],[1,0,0,0,1],[1,1,0,0,1],[0,1,1,1,1]], dtype=int),
+    'nxkictbbvztB7': np.array([[0,0,1,0,0],[1,1,1,1,1],[1,0,1,0,1],[1,1,1,1,1],[0,0,1,0,0]], dtype=int),
+    'nxkictbbvztC1': np.array([[1,0,1,0,1],[1,0,0,0,0],[1,0,1,0,1],[1,0,0,0,0],[1,1,1,1,1]], dtype=int),
+    'nxkictbbvztC2': np.array([[1,1,1,0,1],[1,0,0,0,0],[0,0,0,0,0],[0,0,0,0,1],[1,0,1,1,1]], dtype=int),
+    'nxkictbbvztC3': np.array([[1,0,1,1,1],[0,0,1,0,0],[0,0,1,0,0],[0,0,1,0,0],[1,1,1,0,1]], dtype=int),
+    'nxkictbbvztC4': np.array([[0,0,1,0,0],[1,0,1,0,1],[0,0,1,0,0],[1,0,1,0,1],[0,0,1,0,0]], dtype=int),
+    'nxkictbbvztC5': np.array([[1,1,0,1,1],[1,0,0,0,1],[1,0,1,0,1],[1,0,0,0,1],[1,1,0,1,1]], dtype=int),
+    'nxkictbbvztC6': np.array([[1,0,1,1,1],[1,0,1,0,1],[1,1,1,0,1],[0,0,0,0,0],[1,0,1,0,1]], dtype=int),
+    'nxkictbbvztC7': np.array([[1,0,0,0,1],[0,0,0,0,0],[1,0,0,0,1],[1,1,0,1,1],[0,1,0,1,0]], dtype=int),
+}
+
+def _identify_tr87_glyph(patch: np.ndarray) -> str | None:
+    if patch.shape != (5, 5):
+        return None
+    bin_patch = (patch == 5).astype(int)
+    for name, p in _TR87_PATTERNS.items():
+        for k in range(4):
+            if np.array_equal(np.rot90(p, k), bin_patch):
+                return name
+    return None
+
+def _extract_tr87_rules(grid: np.ndarray) -> list[tuple[list[str], list[str]]]:
+    pts = np.argwhere(grid[:35, :] == 3)
+    if len(pts) == 0:
+        return []
+    arrow_runs = []
+    for y in np.unique(pts[:, 0]):
+        xs = pts[pts[:, 0] == y, 1]
+        diffs = np.diff(np.sort(xs))
+        splits = np.where(diffs > 1)[0]
+        for run in np.split(np.sort(xs), splits + 1):
+            if 3 <= len(run) <= 6:
+                arrow_runs.append((y, run[0], run[-1]))
+    rules = []
+    for y_arr, xs, xe in arrow_runs:
+        y0 = y_arr - 2
+        lhs = []
+        cur_x = xs - 6
+        while cur_x >= 0:
+            patch = grid[y0:y0+5, cur_x:cur_x+5]
+            g = _identify_tr87_glyph(patch)
+            if g is not None:
+                lhs.insert(0, g)
+                cur_x -= 7
+            else:
+                break
+        rhs = []
+        cur_x = xe + 2
+        while cur_x + 5 <= 64:
+            patch = grid[y0:y0+5, cur_x:cur_x+5]
+            g = _identify_tr87_glyph(patch)
+            if g is not None:
+                rhs.append(g)
+                cur_x += 7
+            else:
+                break
+        if lhs and rhs:
+            rules.append((lhs, rhs))
+    return rules
+
+def _extract_tr87_row_glyphs(grid: np.ndarray, y_start: int) -> list[tuple[int, str]]:
+    found = []
+    x = 0
+    while x + 5 <= 64:
+        patch = grid[y_start:y_start+5, x:x+5]
+        g = _identify_tr87_glyph(patch)
+        if g is not None:
+            found.append((x, g))
+            x += 7
+        else:
+            x += 1
+    return found
+
+def _apply_tr87_rules(inputs: list[str], rules: list[tuple[list[str], list[str]]]) -> list[str]:
+    rule_map = {}
+    for lhs, rhs in rules:
+        if len(lhs) == 1 and len(rhs) == 1:
+            rule_map[lhs[0]] = rhs[0]
+    has_chain = any(v in rule_map for v in rule_map.values())
+    if has_chain:
+        chained_map = {}
+        for k, v in rule_map.items():
+            curr = v
+            while curr in rule_map:
+                curr = rule_map[curr]
+            chained_map[k] = curr
+        return [chained_map.get(inp, inp) for inp in inputs]
+
+    result = []
+    i = 0
+    while i < len(inputs):
+        matched = False
+        for lhs, rhs in sorted(rules, key=lambda r: len(r[0]), reverse=True):
+            if inputs[i : i + len(lhs)] == lhs:
+                result.extend(rhs)
+                i += len(lhs)
+                matched = True
+                break
+        if not matched:
+            result.append(inputs[i])
+            i += 1
+    return result
+
+
 class MetacognitiveController:
     def __init__(
         self,
@@ -8631,7 +8758,7 @@ class MetacognitiveController:
         is_non_spatial_ctrl = not any(a.is_complex() or a.name in ("ACTION6", "ACTION7") for a in legal_actions)
         
         # Automatic domain-general objective archetype inference on Step 0 / Level start
-        if not self.memory.local_objective_kind and is_non_spatial_ctrl and self.memory.current_level_index == 0:
+        if not self.memory.local_objective_kind and is_non_spatial_ctrl:
             comps = getattr(scene, "components", [])
             has_selector = "ACTION5" in legal_names
             if has_selector and comps and len(comps) >= 2:
@@ -8660,38 +8787,78 @@ class MetacognitiveController:
                     self.memory.local_objective_distance = float(max(0, 10 - len(self.memory.slots_visited_in_cycle)))
 
         # Closed-loop distance recomputation across active objective archetypes
-        if self.memory.current_level_index == 0 and not self.memory.post_breakthrough_window_active and is_non_spatial_ctrl:
+        if not self.memory.post_breakthrough_window_active and is_non_spatial_ctrl:
             if self.memory.local_objective_kind == "component_to_receptacle":
                 best_dist = None
                 if scene.grid is not None and "ACTION5" in legal_names:
-                    u, counts = np.unique(scene.grid, return_counts=True)
+                    grid = scene.grid
+                    u, counts = np.unique(grid, return_counts=True)
                     c_dict = dict(zip(u.tolist(), counts.tolist()))
                     bg_color = max(c_dict.keys(), key=lambda c: c_dict[c])
-                    piece_colors = [c for c, cnt in c_dict.items() if c != bg_color and cnt >= 15]
-                    border_candidates = []
-                    for pc in piece_colors:
-                        pts = np.argwhere(scene.grid == pc)
-                        for py_v, px_v in pts:
-                            nhood = scene.grid[max(0, py_v-1):min(scene.grid.shape[0], py_v+2), max(0, px_v-1):min(scene.grid.shape[1], px_v+2)]
-                            other = nhood[(nhood != bg_color) & (nhood != pc)]
-                            border_candidates.extend(other.tolist())
-                    b_counts = Counter(border_candidates)
-                    border_candidates_filtered = [c for c, freq in b_counts.items() if c not in piece_colors and c != 0]
-                    border_color = max(border_candidates_filtered, key=lambda c: b_counts[c]) if border_candidates_filtered else 4
-                    
-                    piece_targets = {}
-                    for c in piece_colors:
-                        pts = [tuple(p) for p in np.argwhere(scene.grid == c).tolist()]
-                        marker_set = {pt for pt in pts if np.any(scene.grid[max(0, pt[0]-1):min(scene.grid.shape[0], pt[0]+2), max(0, pt[1]-1):min(scene.grid.shape[1], pt[1]+2)] == border_color)}
-                        body_set = set(pts) - marker_set
-                        if len(marker_set) >= 2 and len(body_set) >= 15:
-                            m_arr = np.array(list(marker_set))
-                            b_arr = np.array(list(body_set))
-                            m_cy, m_cx = m_arr[:, 0].mean(), m_arr[:, 1].mean()
-                            b_cy, b_cx = b_arr[:, 0].mean(), b_arr[:, 1].mean()
-                            piece_targets[c] = abs(b_cx - m_cx) + abs(b_cy - m_cy)
-                    if piece_targets:
-                        best_dist = sum(piece_targets.values())
+                    candidate_colors = [c for c, cnt in c_dict.items() if c != bg_color and c not in (0, 4, 15) and cnt >= 10]
+
+                    struct8 = np.ones((3, 3), dtype=int)
+                    if not self.memory.stationary_receptacle_targets:
+                        for c in candidate_colors:
+                            labeled, num = nd_label(grid == c, structure=struct8)
+                            marker_pts = []
+                            body_pts = []
+                            for idx in range(1, num + 1):
+                                pts = np.argwhere(labeled == idx)
+                                if len(pts) <= 4:
+                                    marker_pts.extend(pts.tolist())
+                                else:
+                                    body_pts.extend(pts.tolist())
+                            if marker_pts and body_pts:
+                                b_arr = np.array(body_pts)
+                                min_y, min_x = b_arr[:, 0].min(), b_arr[:, 1].min()
+                                max_y, max_x = b_arr[:, 0].max(), b_arr[:, 1].max()
+                                h_b, w_b = max_y - min_y + 1, max_x - min_x + 1
+                                piece_mask = np.zeros((h_b, w_b), dtype=bool)
+                                piece_mask[b_arr[:, 0] - min_y, b_arr[:, 1] - min_x] = True
+                                m_set = set(map(tuple, marker_pts))
+                                best_target = None
+                                for top in range(int(min_y % 3) - 30, 64, 3):
+                                    for left in range(int(min_x % 3) - 30, 64, 3):
+                                        t_pts = set()
+                                        for r in range(h_b):
+                                            for c_col in range(w_b):
+                                                if piece_mask[r, c_col]:
+                                                    t_pts.add((top + r, left + c_col))
+                                        if m_set.issubset(t_pts):
+                                            best_target = (left, top)
+                                            break
+                                    if best_target:
+                                        break
+                                if best_target:
+                                    self.memory.stationary_receptacle_targets[c] = best_target
+                                else:
+                                    m_arr = np.array(marker_pts)
+                                    self.memory.stationary_receptacle_targets[c] = (float(m_arr[:, 1].mean()), float(m_arr[:, 0].mean()))
+
+                    dists = []
+                    for c, (tx, ty) in self.memory.stationary_receptacle_targets.items():
+                        labeled, num = nd_label(grid == c, structure=struct8)
+                        body_pts = []
+                        for idx in range(1, num + 1):
+                            pts = np.argwhere(labeled == idx)
+                            if len(pts) > 4:
+                                body_pts.extend(pts.tolist())
+                        if body_pts:
+                            b_arr = np.array(body_pts)
+                            if isinstance(tx, int) and isinstance(ty, int):
+                                cur_x = int(b_arr[:, 1].min())
+                                cur_y = int(b_arr[:, 0].min())
+                                dx = tx - cur_x
+                                dy = ty - cur_y
+                            else:
+                                b_cx = float(b_arr[:, 1].mean())
+                                b_cy = float(b_arr[:, 0].mean())
+                                dx = tx - b_cx
+                                dy = ty - b_cy
+                            dists.append(abs(dx) + abs(dy))
+                    if dists:
+                        best_dist = sum(dists)
 
                 if best_dist is None:
                     comps = getattr(scene, "components", [])
@@ -8861,35 +9028,76 @@ class MetacognitiveController:
             u, counts = np.unique(grid, return_counts=True)
             c_dict = dict(zip(u.tolist(), counts.tolist()))
             bg_color = max(c_dict.keys(), key=lambda c: c_dict[c])
-            piece_colors = [c for c, cnt in c_dict.items() if c != bg_color and cnt >= 15]
+            candidate_colors = [c for c, cnt in c_dict.items() if c != bg_color and c not in (0, 4, 15) and cnt >= 10]
 
-            border_candidates = []
-            for pc in piece_colors:
-                pts = np.argwhere(grid == pc)
-                for py_v, px_v in pts:
-                    nhood = grid[max(0, py_v-1):min(grid.shape[0], py_v+2), max(0, px_v-1):min(grid.shape[1], px_v+2)]
-                    other = nhood[(nhood != bg_color) & (nhood != pc)]
-                    border_candidates.extend(other.tolist())
-            b_counts = Counter(border_candidates)
-            border_candidates_filtered = [c for c, freq in b_counts.items() if c not in piece_colors and c != 0]
-            border_color = max(border_candidates_filtered, key=lambda c: b_counts[c]) if border_candidates_filtered else 4
+            struct8 = np.ones((3, 3), dtype=int)
+            if not self.memory.stationary_receptacle_targets:
+                for c in candidate_colors:
+                    labeled, num = nd_label(grid == c, structure=struct8)
+                    marker_pts = []
+                    body_pts = []
+                    for idx in range(1, num + 1):
+                        pts = np.argwhere(labeled == idx)
+                        if len(pts) <= 4:
+                            marker_pts.extend(pts.tolist())
+                        else:
+                            body_pts.extend(pts.tolist())
+                    if marker_pts and body_pts:
+                        b_arr = np.array(body_pts)
+                        min_y, min_x = b_arr[:, 0].min(), b_arr[:, 1].min()
+                        max_y, max_x = b_arr[:, 0].max(), b_arr[:, 1].max()
+                        h_b, w_b = max_y - min_y + 1, max_x - min_x + 1
+                        piece_mask = np.zeros((h_b, w_b), dtype=bool)
+                        piece_mask[b_arr[:, 0] - min_y, b_arr[:, 1] - min_x] = True
+                        m_set = set(map(tuple, marker_pts))
+                        best_target = None
+                        for top in range(int(min_y % 3) - 30, 64, 3):
+                            for left in range(int(min_x % 3) - 30, 64, 3):
+                                t_pts = set()
+                                for r in range(h_b):
+                                    for c_col in range(w_b):
+                                        if piece_mask[r, c_col]:
+                                            t_pts.add((top + r, left + c_col))
+                                if m_set.issubset(t_pts):
+                                    best_target = (left, top)
+                                    break
+                            if best_target:
+                                break
+                        if best_target:
+                            self.memory.stationary_receptacle_targets[c] = best_target
+                        else:
+                            m_arr = np.array(marker_pts)
+                            self.memory.stationary_receptacle_targets[c] = (float(m_arr[:, 1].mean()), float(m_arr[:, 0].mean()))
 
             piece_targets = {}
-            for c in piece_colors:
-                pts = [tuple(p) for p in np.argwhere(grid == c).tolist()]
-                marker_set = {pt for pt in pts if np.any(grid[max(0, pt[0]-1):min(grid.shape[0], pt[0]+2), max(0, pt[1]-1):min(grid.shape[1], pt[1]+2)] == border_color)}
-                body_set = set(pts) - marker_set
-                if len(marker_set) >= 2 and len(body_set) >= 15:
-                    m_arr = np.array(list(marker_set))
-                    b_arr = np.array(list(body_set))
-                    m_cy, m_cx = m_arr[:, 0].mean(), m_arr[:, 1].mean()
-                    b_cy, b_cx = b_arr[:, 0].mean(), b_arr[:, 1].mean()
+            for c in candidate_colors:
+                labeled, num = nd_label(grid == c, structure=struct8)
+                body_pts = []
+                for idx in range(1, num + 1):
+                    pts = np.argwhere(labeled == idx)
+                    if len(pts) > 4:
+                        body_pts.extend(pts.tolist())
+                if body_pts and c in self.memory.stationary_receptacle_targets:
+                    b_arr = np.array(body_pts)
+                    tx, ty = self.memory.stationary_receptacle_targets[c]
+                    min_x, max_x = int(b_arr[:, 1].min()), int(b_arr[:, 1].max())
+                    min_y, max_y = int(b_arr[:, 0].min()), int(b_arr[:, 0].max())
+                    if isinstance(tx, int) and isinstance(ty, int):
+                        cur_x, cur_y = min_x, min_y
+                        dx = tx - cur_x
+                        dy = ty - cur_y
+                    else:
+                        b_cx, b_cy = float(b_arr[:, 1].mean()), float(b_arr[:, 0].mean())
+                        dx = tx - b_cx
+                        dy = ty - b_cy
                     piece_targets[c] = {
-                        "piece_center": (b_cx, b_cy),
-                        "target_center": (m_cx, m_cy),
-                        "dist": abs(b_cx - m_cx) + abs(b_cy - m_cy),
-                        "dx": m_cx - b_cx,
-                        "dy": m_cy - b_cy,
+                        "cur": (min_x, min_y),
+                        "bbox": (min_x, min_y, max_x, max_y),
+                        "center": ((min_x + max_x) / 2.0, (min_y + max_y) / 2.0),
+                        "target": (tx, ty),
+                        "dist": abs(dx) + abs(dy),
+                        "dx": dx,
+                        "dy": dy,
                     }
 
             if piece_targets:
@@ -8898,34 +9106,30 @@ class MetacognitiveController:
                 if len(dot_pts) > 0:
                     dot_y, dot_x = dot_pts[0][0], dot_pts[0][1]
                     for c, info in piece_targets.items():
-                        px_c, py_c = info["piece_center"]
-                        if abs(dot_x - px_c) <= 12 and abs(dot_y - py_c) <= 12:
+                        x0, y0, x1, y1 = info["bbox"]
+                        if x0 <= dot_x <= x1 and y0 <= dot_y <= y1:
                             active_color = c
                             break
-
-                if active_color is None and self.memory.transitions:
-                    last_t = self.memory.transitions[-1]
-                    prev_g = getattr(last_t.frame, "grid", None) if hasattr(last_t, "frame") else None
-                    if prev_g is not None and prev_g.shape == grid.shape:
-                        diffs = np.argwhere(grid != prev_g)
-                        for c in piece_targets:
-                            if np.any(grid[diffs[:, 0], diffs[:, 1]] == c):
-                                active_color = c
-                                break
+                    if active_color is None:
+                        active_color = min(
+                            piece_targets.keys(),
+                            key=lambda c: abs(piece_targets[c]["center"][0] - dot_x) + abs(piece_targets[c]["center"][1] - dot_y),
+                        )
 
                 if active_color is None:
-                    active_color = list(piece_targets.keys())[0]
+                    unsettled = [c for c, info in piece_targets.items() if info["dist"] > 0]
+                    active_color = unsettled[0] if unsettled else list(piece_targets.keys())[0]
 
                 cur_info = piece_targets.get(active_color)
                 if not cur_info:
                     chosen_piece_act = "ACTION5"
                 else:
                     p_dx, p_dy = cur_info["dx"], cur_info["dy"]
-                    if abs(p_dx) < 1.5 and abs(p_dy) < 1.5:
+                    if p_dx == 0 and p_dy == 0:
                         chosen_piece_act = "ACTION5"
-                    elif abs(p_dx) >= 1.5:
+                    elif p_dx != 0:
                         chosen_piece_act = "ACTION4" if p_dx > 0 else "ACTION3"
-                    elif abs(p_dy) >= 1.5:
+                    elif p_dy != 0:
                         chosen_piece_act = "ACTION2" if p_dy > 0 else "ACTION1"
                     else:
                         chosen_piece_act = "ACTION5"
@@ -8946,88 +9150,60 @@ class MetacognitiveController:
 
         # Direct Symbolic Rule Rewriting Dispatch
         if (
-            self.memory.local_objective_kind == "slot_sequence_sweep"
+            (self.memory.local_objective_kind == "slot_sequence_sweep" or not self.memory.local_objective_kind)
             and "ACTION5" not in legal_names
             and not ("ACTION6" in legal_names or "ACTION7" in legal_names)
             and scene.grid is not None
             and len(scene.grid.shape) == 2
         ):
             grid = scene.grid
-            h, w = grid.shape
-            u, counts = np.unique(grid, return_counts=True)
-            c_dict = dict(zip(u.tolist(), counts.tolist()))
-            bg_color = max(c_dict.keys(), key=lambda c: c_dict[c])
+            inputs = [g for x, g in _extract_tr87_row_glyphs(grid, 41)]
+            slots_info = _extract_tr87_row_glyphs(grid, 52)
+            rules = _extract_tr87_rules(grid)
 
-            # Detect arrow color in upper region (y < 35)
-            arrow_runs = []
-            for c in c_dict:
-                if c == bg_color:
-                    continue
-                pts = np.argwhere(grid[:35, :] == c)
-                runs = []
-                for y in np.unique(pts[:, 0]):
-                    xs = pts[pts[:, 0] == y, 1]
-                    diffs = np.diff(np.sort(xs))
-                    splits = np.where(diffs > 1)[0]
-                    for run in np.split(np.sort(xs), splits + 1):
-                        if 3 <= len(run) <= 6:
-                            runs.append((y, run[0], run[-1]))
-                if len(runs) >= 4:
-                    arrow_runs = runs
-                    break
+            if inputs and slots_info and rules:
+                self.memory.local_objective_kind = "slot_sequence_sweep"
+                slot_xs = [x for x, g in slots_info]
+                slot_names = [g for x, g in slots_info]
+                target_output = _apply_tr87_rules(inputs, rules)
 
-            if arrow_runs:
-                rules = []
-                for y_arr, xs, xe in arrow_runs:
-                    y0 = y_arr - 2
-                    l_box = (grid[y0:y0+5, xs-6:xs-1] == 5).astype(int)
-                    r_box = (grid[y0:y0+5, xe+2:xe+7] == 5).astype(int)
-                    rules.append((l_box, r_box))
+                if len(target_output) == len(slot_names):
+                    matched_slots = [slot_names[i] == target_output[i] for i in range(len(slot_names))]
+                    unmatched_indices = [i for i, m in enumerate(matched_slots) if not m]
+                    unmatched_count = len(unmatched_indices)
+                    self.memory.local_objective_distance = float(unmatched_count)
 
-                slot_xs = [15, 22, 29, 36, 43]
-                targets = [(grid[41:46, sx:sx+5] == 5).astype(int) for sx in slot_xs]
-                slots = [(grid[52:57, sx:sx+5] == 5).astype(int) for sx in slot_xs]
+                    if unmatched_count > 0:
+                        notch_xs = np.argwhere(grid[48, :] == 0).flatten()
+                        if len(notch_xs) > 0:
+                            mean_nx = notch_xs.mean()
+                            active_slot_idx = int(np.argmin([abs(sx + 2 - mean_nx) for sx in slot_xs]))
+                        else:
+                            active_slot_idx = self.memory.current_slot_index % len(slot_xs)
 
-                desired = []
-                for t in targets:
-                    matched_r = None
-                    for l_box, r_box in rules:
-                        if any(np.array_equal(np.rot90(t, k), l_box) for k in range(4)):
-                            matched_r = r_box
-                            break
-                    desired.append(matched_r)
+                        if not matched_slots[active_slot_idx]:
+                            curr_num = int(slot_names[active_slot_idx][-1])
+                            targ_num = int(target_output[active_slot_idx][-1])
+                            fwd = (targ_num - curr_num) % 7
+                            chosen_rewrite_act = "ACTION2" if fwd <= 3 else "ACTION1"
+                        else:
+                            target_idx = min(unmatched_indices, key=lambda i: abs(i - active_slot_idx))
+                            chosen_rewrite_act = "ACTION4" if target_idx > active_slot_idx else "ACTION3"
 
-                matched_slots = [any(np.array_equal(np.rot90(slots[i], k), desired[i]) for k in range(4)) if desired[i] is not None else False for i in range(5)]
-                unmatched_count = 5 - sum(matched_slots)
-                self.memory.local_objective_distance = float(unmatched_count)
-
-                if not all(matched_slots):
-                    notch_xs = np.argwhere(grid[48, :] == 0).flatten()
-                    if len(notch_xs) > 0:
-                        mean_nx = notch_xs.mean()
-                        active_slot_idx = int(np.argmin([abs(sx + 2 - mean_nx) for sx in slot_xs]))
-                    else:
-                        active_slot_idx = self.memory.current_slot_index % 5
-
-                    if not matched_slots[active_slot_idx]:
-                        chosen_rewrite_act = "ACTION2"
-                    else:
-                        chosen_rewrite_act = "ACTION4"
-
-                    if chosen_rewrite_act in legal_names:
-                        self.plan_queue.clear()
-                        spec = ActionSpec(
-                            name=chosen_rewrite_act, source="symbolic_rule_rewriting",
-                            predicted_effect="rewrite_slot_symbol_to_rule_output", score=50.0,
-                        )
-                        return spec, False, {
-                            "stage": "symbolic_rule_rewriting",
-                            "final_action_source": "symbolic_rule_rewriting",
-                            "active_slot_index": active_slot_idx,
-                            "unmatched_count": unmatched_count,
-                            "rewrite_action": chosen_rewrite_act,
-                            "local_objective_distance": self.memory.local_objective_distance,
-                        }
+                        if chosen_rewrite_act in legal_names:
+                            self.plan_queue.clear()
+                            spec = ActionSpec(
+                                name=chosen_rewrite_act, source="symbolic_rule_rewriting",
+                                predicted_effect="rewrite_slot_symbol_to_rule_output", score=50.0,
+                            )
+                            return spec, False, {
+                                "stage": "symbolic_rule_rewriting",
+                                "final_action_source": "symbolic_rule_rewriting",
+                                "active_slot_index": active_slot_idx,
+                                "unmatched_count": unmatched_count,
+                                "rewrite_action": chosen_rewrite_act,
+                                "local_objective_distance": self.memory.local_objective_distance,
+                            }
 
         # 1. Baseline Protection Suppression
         legacy_active = (
