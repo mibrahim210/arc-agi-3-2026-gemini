@@ -115,7 +115,7 @@ def _env_float(name: str, default: float) -> float:
 
 @dataclass(slots=True)
 class Config:
-    max_actions: int = _env_int("DEWMA_MAX_ACTIONS", 600)
+    max_actions: int = _env_int("DEWMA_MAX_ACTIONS", 500)
     enable_entities: bool = _env_bool("DEWMA_ENTITIES", True)
     enable_spatial_hash: bool = _env_bool("DEWMA_SPATIAL_HASH", True)
     enable_dead_signatures: bool = _env_bool("DEWMA_DEAD_SIGNATURES", True)
@@ -10390,7 +10390,7 @@ def _is_meaningful_progress(
 class MyAgent(Agent):
     """DEWMA-ARC v4 agent with level-scoped alignment and global runtime control."""
 
-    MAX_ACTIONS = _env_int("DEWMA_MAX_ACTIONS", 400)
+    MAX_ACTIONS = _env_int("DEWMA_MAX_ACTIONS", 500)
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
